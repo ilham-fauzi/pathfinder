@@ -97,6 +97,14 @@ brew install yt-dlp ffmpeg
 
 ## Getting started
 
+### Install with Homebrew
+
+```bash
+brew install --cask ilham-fauzi/tap/pathfinder
+```
+
+The app is ad hoc signed and not notarized, so macOS may block the first launch. If so, run `xattr -dr com.apple.quarantine /Applications/Pathfinder.app` or right-click the app and choose **Open**.
+
 ### Run from source
 
 ```bash
