@@ -1,12 +1,12 @@
-name: Y-Downloader
+name: Pathfinder
 options:
-  bundleIdPrefix: com.ydownloader
+  bundleIdPrefix: com.pathfinder
 packages:
   SafariConverterLib:
     url: https://github.com/AdguardTeam/SafariConverterLib.git
     from: 4.3.0
 targets:
-  Y-Downloader:
+  Pathfinder:
     type: application
     dependencies:
       - package: SafariConverterLib
@@ -14,13 +14,13 @@ targets:
     platform: macOS
     deploymentTarget: "14.0"
     sources:
-      - path: Y-Downloader
+      - path: Pathfinder
     resources:
-      - path: Y-Downloader/Resources
+      - path: Pathfinder/Resources
     info:
-      path: Y-Downloader/Resources/Info.plist
+      path: Pathfinder/Resources/Info.plist
     entitlements:
-      path: Y-Downloader/Resources/Y-Downloader.entitlements
+      path: Pathfinder/Resources/Pathfinder.entitlements
     settings:
       SWIFT_VERSION: "6.0"
-      PRODUCT_NAME: ADV Downloader
+      PRODUCT_NAME: Pathfinder

@@ -1,4 +1,4 @@
-# ADV Downloader — Technical Requirements Document (TRD)
+# Pathfinder — Technical Requirements Document (TRD)
 
 **Version:** 0.2 · **Stack:** Swift 6, SwiftUI, Observation (`@Observable`), macOS 14+, SwiftPM / XcodeGen (`project.yml`)
 
@@ -15,7 +15,7 @@ Views (SwiftUI)  ──reads/writes──▶  Stores / State (@Observable)
 
 | Layer | Files |
 |---|---|
-| App | `App/Y_DownloaderApp.swift`, `App/AppState.swift` |
+| App | `App/PathfinderApp.swift`, `App/AppState.swift` |
 | Models | `VideoInfo`, `FormatInfo`, `DownloadItem`, `DownloadOptions`, `ProgressUpdate`, … |
 | Stores | `SettingsStore` (persisted via UserDefaults), `LogStore` |
 | Services | `YTDLPService`, `QueueManager`, `ProcessRunner`, `DependencyChecker`, `ClipboardMonitor` |
@@ -104,12 +104,12 @@ Map `yt-dlp` stderr to user messages:
 
 ## 7. Persistence
 - Settings: UserDefaults.
-- Queue (P2): JSON file in `~/Library/Application Support/Y-Downloader/queue.json`; restore queued/paused items, mark interrupted as failed.
+- Queue (P2): JSON file in `~/Library/Application Support/Pathfinder/queue.json`; restore queued/paused items, mark interrupted as failed.
 
 ## 8. Security & privacy
 - Pass arguments as an array to `Process` (no shell string) to prevent injection from URLs or titles.
 - Only `yt-dlp` makes network requests to media hosts; thumbnail fetching is optional (F14).
-- App sandbox/entitlements must allow user-selected folder write and running user-installed binaries; confirm in `Y-Downloader.entitlements`.
+- App sandbox/entitlements must allow user-selected folder write and running user-installed binaries; confirm in `Pathfinder.entitlements`.
 
 ## 9. Testing
 - Unit: `ProgressUpdate.parse`, `QualityOptions.make`, error mapping, `SettingsStore` defaults/persistence.

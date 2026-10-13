@@ -1,4 +1,4 @@
-// Draws the ADV Downloader app icon and writes design/AppIcon-1024.png.
+// Draws the Pathfinder app icon and writes design/AppIcon-1024.png.
 // Run: swift scripts/make-icon.swift   (scripts/build-icon.sh then builds the .icns)
 import AppKit
 

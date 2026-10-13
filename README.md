@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="design/AppIcon-1024.png" alt="ADV Downloader icon" width="128" height="128">
+  <img src="design/AppIcon-1024.png" alt="Pathfinder icon" width="128" height="128">
 </p>
 
-<h1 align="center">ADV Downloader</h1>
+<h1 align="center">Pathfinder</h1>
 
 <p align="center">
   A native macOS app for downloading video and audio from the web — guided for everyday use, powerful when you need it.
@@ -38,7 +38,7 @@
 
 ## Overview
 
-ADV Downloader is a macOS application built with SwiftUI. It wraps [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) and [`ffmpeg`](https://ffmpeg.org) in a simple, guided interface: paste a link (or search), pick a quality, and download. Power users can switch to **Advanced** mode to control formats, post-processing, subtitles, networking and the exact command line.
+Pathfinder is a macOS application built with SwiftUI. It wraps [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) and [`ffmpeg`](https://ffmpeg.org) in a simple, guided interface: paste a link (or search), pick a quality, and download. Power users can switch to **Advanced** mode to control formats, post-processing, subtitles, networking and the exact command line.
 
 Two additions set it apart from a plain `yt-dlp` front end:
 
@@ -101,11 +101,11 @@ brew install yt-dlp ffmpeg
 
 ```bash
 git clone <repository-url>
-cd Y-Downloader
+cd Pathfinder
 ./scripts/run-app.sh
 ```
 
-The script builds the project, assembles `ADV Downloader.app` in `.build/`, signs it ad hoc and launches it. Running it as a real `.app` bundle matters: keyboard shortcuts, notifications and the Dock icon only work properly that way.
+The script builds the project, assembles `Pathfinder.app` in `.build/`, signs it ad hoc and launches it. Running it as a real `.app` bundle matters: keyboard shortcuts, notifications and the Dock icon only work properly that way.
 
 On first launch the **Setup Assistant** checks for `yt-dlp` and `ffmpeg` and helps you install what is missing. You can also set custom paths under **Settings → Binaries**.
 
@@ -195,11 +195,11 @@ The browser is experimental. It is gated by **Settings → General → Experimen
 
 | Item | Location |
 |---|---|
-| Default download folder | `~/Downloads/Y-Downloader` (change in Settings) |
-| App data (`yt-dlp` binary, queue, presets, ad filter lists, pinned SSH host keys) | `~/Library/Application Support/Y-Downloader/` |
-| VPN secrets (key, passphrase, password) | macOS Keychain, service `com.ydownloader.vpn` |
-| Preferences | `UserDefaults` (`com.ydownloader.Y-Downloader`) |
-| Browser cookies and site data | `~/Library/WebKit/com.ydownloader.Y-Downloader` |
+| Default download folder | `~/Downloads/Pathfinder` (change in Settings) |
+| App data (`yt-dlp` binary, queue, presets, ad filter lists, pinned SSH host keys) | `~/Library/Application Support/Pathfinder/` |
+| VPN secrets (key, passphrase, password) | macOS Keychain, service `com.pathfinder.vpn` |
+| Preferences | `UserDefaults` (`com.pathfinder.Pathfinder`) |
+| Browser cookies and site data | `~/Library/WebKit/com.pathfinder.Pathfinder` |
 
 ## Privacy and security
 
@@ -207,7 +207,7 @@ The browser is experimental. It is gated by **Settings → General → Experimen
 - **Network activity** is limited to: the sites you download from or browse, the `yt-dlp` updater (if enabled), the ad filter lists on `easylist.to`, and — when the VPN is connected — a request to `api.ipify.org` through the tunnel to display your exit IP.
 - The filter-list download does not go through the VPN tunnel.
 - The VPN is only as private as the server you point it at; your server operator can see the traffic that exits through it.
-- The app is not sandboxed (it runs user-installed binaries). Review the entitlements in [`Y-Downloader.entitlements`](Y-Downloader/Resources/Y-Downloader.entitlements) before distributing.
+- The app is not sandboxed (it runs user-installed binaries). Review the entitlements in [`Pathfinder.entitlements`](Pathfinder/Resources/Pathfinder.entitlements) before distributing.
 - The site-mute feature calls an internal WebKit selector (`_setPageMuted:`). It is looked up at runtime and the button disables itself if it is unavailable. Replace it with a public mechanism before any App Store submission.
 
 ## Development
@@ -215,8 +215,8 @@ The browser is experimental. It is gated by **Settings → General → Experimen
 ### Project layout
 
 ```text
-Y-Downloader/
-├── Y-Downloader/            Application sources
+Pathfinder/
+├── Pathfinder/            Application sources
 │   ├── App/                 App entry point, global state, window sizing
 │   ├── Models/              Download options, video info, lists, presets
 │   ├── Services/            yt-dlp service, queue, SSH tunnel, Keychain, helpers
@@ -258,7 +258,7 @@ YDL_EASYLIST=/path/to/easylist.txt swift test --filter testEasyListConvertsAndCo
 
 ```bash
 swift scripts/make-icon.swift      # draws design/AppIcon-1024.png
-./scripts/build-icon.sh            # builds Y-Downloader/Resources/AppIcon.icns
+./scripts/build-icon.sh            # builds Pathfinder/Resources/AppIcon.icns
 ```
 
 ### Dependencies
@@ -295,11 +295,11 @@ swift scripts/make-icon.swift      # draws design/AppIcon-1024.png
 
 ## Legal
 
-ADV Downloader is a general-purpose tool. You are responsible for complying with the terms of service of the sites you use and with copyright law in your jurisdiction. Only download content you have the right to save.
+Pathfinder is a general-purpose tool. You are responsible for complying with the terms of service of the sites you use and with copyright law in your jurisdiction. Only download content you have the right to save.
 
 ## License
 
-ADV Downloader is free software, released under the **GNU General Public License v3.0**. See [LICENSE](LICENSE) for the full text.
+Pathfinder is free software, released under the **GNU General Public License v3.0**. See [LICENSE](LICENSE) for the full text.
 
 Copyright © 2026 ilham-fauzi.
 

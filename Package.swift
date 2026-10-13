@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "Y-Downloader",
+    name: "Pathfinder",
     platforms: [
         .macOS(.v14)
     ],
@@ -11,16 +11,16 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "Y-Downloader",
+            name: "Pathfinder",
             dependencies: [
                 .product(name: "ContentBlockerConverter", package: "SafariConverterLib")
             ],
-            path: "Y-Downloader",
+            path: "Pathfinder",
             exclude: ["Resources"]
         ),
         .testTarget(
-            name: "Y-DownloaderTests",
-            dependencies: ["Y-Downloader"],
+            name: "PathfinderTests",
+            dependencies: ["Pathfinder"],
             path: "Tests"
         )
     ]

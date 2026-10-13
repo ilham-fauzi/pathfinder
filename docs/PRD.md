@@ -1,9 +1,9 @@
-# ADV Downloader — Product Requirements Document (PRD)
+# Pathfinder — Product Requirements Document (PRD)
 
 **Version:** 0.2 (redesign) · **Platform:** macOS 14+ · **Status:** Draft, aligned to the "Media Downloader" design (dark + light, 9 screens)
 
 ## 1. Overview
-ADV Downloader is a macOS app that downloads video or audio from a link, powered by `yt-dlp` and `ffmpeg`. v0.2 shifts the primary experience from a power-user yt-dlp GUI to a **simple, guided flow**: paste a link, pick a quality, download. Advanced options remain available but are secondary.
+Pathfinder is a macOS app that downloads video or audio from a link, powered by `yt-dlp` and `ffmpeg`. v0.2 shifts the primary experience from a power-user yt-dlp GUI to a **simple, guided flow**: paste a link, pick a quality, download. Advanced options remain available but are secondary.
 
 ## 2. Goals / Non-goals
 **Goals**
