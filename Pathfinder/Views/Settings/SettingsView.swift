@@ -260,13 +260,20 @@ struct FileNamingExamples: View {
 }
 
 struct AboutSettingsTab: View {
+    private static var versionString: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(version) (\(build))"
+    }
+
     var body: some View {
         VStack(spacing: 16) {
             Image(systemName: "arrow.down.circle.fill")
                 .font(.system(size: 64))
                 .foregroundColor(.accentColor)
             Text("Pathfinder").font(.title).bold()
-            Text("Version 0.1.0").foregroundColor(.secondary)
+            Text("Version \(Self.versionString)").foregroundColor(.secondary)
             
             HStack {
                 Link("GitHub", destination: URL(string: "https://github.com")!)
