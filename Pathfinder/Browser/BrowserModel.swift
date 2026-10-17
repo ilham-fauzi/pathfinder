@@ -169,6 +169,8 @@ final class BrowserTab: Identifiable {
     fileprivate var restoreURL: URL?
     /// Media streams (HLS .m3u8, DASH .mpd, or direct video) detected on this tab's page.
     fileprivate(set) var detectedStreams: [DetectedStream] = []
+    /// What the security tools found on this tab's page (API calls, threats, site protection).
+    let security = TabSecurity()
     @ObservationIgnored fileprivate var observations: [NSKeyValueObservation] = []
 
     init(webView: WKWebView) { self.webView = webView }
@@ -260,6 +262,9 @@ final class BrowserModel: NSObject {
     /// Folder for direct file downloads (set by the app).
     @ObservationIgnored var downloadDirectory: () -> String = { NSHomeDirectory() + "/Downloads" }
     @ObservationIgnored private var snifferHandler: MediaSnifferScriptHandler?
+    @ObservationIgnored private var securityHandler: SecurityScriptHandler?
+    /// Page scanner, firewall and file-integrity monitor.
+    let security = SecurityCenter()
 
     static let mediaSnifferScript = """
     (function() {
@@ -411,6 +416,14 @@ final class BrowserModel: NSObject {
         let handler = MediaSnifferScriptHandler(model: self)
         contentController.add(handler, name: "mediaSniffer")
         snifferHandler = handler
+        let guardHandler = SecurityScriptHandler(model: self)
+        contentController.add(guardHandler, name: PageGuardScript.handlerName)
+        securityHandler = guardHandler
+        security.onScriptsChanged = { [weak self] in Task { await self?.applyAdBlock(reload: true) } }
+        security.integrity.watchedFolders = { [weak self] in
+            [self?.downloadDirectory() ?? NSHomeDirectory() + "/Downloads", FileIntegrityMonitor.toolsFolder]
+        }
+        security.integrity.start()
         let first = makeTab()
         tabs = [first]
         selectedTabID = first.id
@@ -467,6 +480,25 @@ final class BrowserModel: NSObject {
         tabs.append(tab)
         select(tab.id)
         if let input { go(input) }
+    }
+
+    // MARK: Security
+
+    nonisolated static func pageKey(_ url: URL) -> String {
+        var c = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        c?.fragment = nil
+        return c?.string ?? url.absoluteString
+    }
+
+    func handleSecurityMessage(_ body: [String: Any], in webView: WKWebView?) {
+        guard let tab = tab(for: webView) else { return }
+        security.handle(body, in: tab.security, pageHost: tab.currentURL?.host)
+    }
+
+    /// Fingerprint a file saved by the browser, so a later change to it is noticed.
+    private func recordIntegrity(_ path: String, entry: ActiveDownload) {
+        let origin = entry.item?.url ?? entry.download.originalRequest?.url?.absoluteString
+        Task { await security.integrity.record(path: path, source: .download, origin: origin) }
     }
 
     // MARK: Pinned tabs
@@ -625,6 +657,7 @@ final class BrowserModel: NSObject {
 
     func go(_ input: String) {
         guard let url = Self.resolve(input) else { return }
+        security.typedURL = url
         selectedTab.loadError = nil
         selectedTab.blockedURL = nil
         webView.load(URLRequest(url: url))
@@ -684,6 +717,18 @@ final class BrowserModel: NSObject {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: false
         ))
+
+        // The security script and the firewall's rules do not depend on the ad blocker being on.
+        controller.addUserScript(WKUserScript(
+            source: PageGuardScript.source(mode: security.wafMode, allowedHosts: security.allowedHosts),
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        ))
+        if security.filtering, let store = WKContentRuleListStore.default() {
+            if let waf = try? await store.compileContentRuleList(
+                forIdentifier: WAFRules.identifier, encodedContentRuleList: WAFRules.contentRulesJSON()),
+               generation == adBlockGeneration { controller.add(waf) }
+        }
 
         adBlockReady = false
         adBlockDetail = nil
@@ -931,6 +976,18 @@ final class BrowserModel: NSObject {
 extension BrowserModel: WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
+        if let tab = tab(for: webView) {
+            if navigationAction.targetFrame?.isMainFrame ?? false, let url = navigationAction.request.url,
+               Self.pageKey(url) != tab.security.pageKey {
+                tab.security.reset()
+                tab.security.pageKey = Self.pageKey(url)
+            }
+            if case .block(let reason) = security.review(navigationAction, tab: tab.security, pageURL: tab.currentURL) {
+                statusMessage = "Firewall stopped a request: \(reason)."
+                decisionHandler(.cancel)
+                return
+            }
+        }
         if navigationAction.shouldPerformDownload { decisionHandler(.download); return }
         if navigationAction.targetFrame?.isMainFrame ?? false, let host = Self.key(for: navigationAction.request.url),
            let tab = tab(for: webView) {
@@ -945,7 +1002,17 @@ extension BrowserModel: WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
                  decisionHandler: @escaping @MainActor (WKNavigationResponsePolicy) -> Void) {
         let disposition = (navigationResponse.response as? HTTPURLResponse)?
             .value(forHTTPHeaderField: "Content-Disposition")?.lowercased() ?? ""
+        if navigationResponse.isForMainFrame, let http = navigationResponse.response as? HTTPURLResponse,
+           let tab = tab(for: webView) {
+            tab.security.protection = WAFRules.protection(for: http)
+        }
         if disposition.hasPrefix("attachment") || !navigationResponse.canShowMIMEType {
+            if let tab = tab(for: webView),
+               case .block(let reason) = security.reviewResponse(navigationResponse.response, tab: tab.security) {
+                statusMessage = "Firewall stopped a download: \(reason)."
+                decisionHandler(.cancel)
+                return
+            }
             decisionHandler(.download)
         } else {
             decisionHandler(.allow)
@@ -959,8 +1026,20 @@ extension BrowserModel: WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
         register(download, frame: nil)
     }
 
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        guard let tab = tab(for: webView) else { return }
+        tab.security.redirectChain = webView.url?.host.map { [$0] } ?? []
+    }
+
+    func webView(_ webView: WKWebView, didReceiveServerRedirectForProvisionalNavigation navigation: WKNavigation!) {
+        guard let tab = tab(for: webView) else { return }
+        security.noteRedirect(to: webView.url, tab: tab.security)
+    }
+
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         guard let tab = tab(for: webView) else { return }
+        security.finishChain(tab: tab.security)
+        if let url = webView.url { security.noteInsecure(url, tab: tab.security) }
         tab.loadError = nil
         tab.blockedURL = nil
         tab.detectedStreams.removeAll()
@@ -1007,6 +1086,13 @@ extension BrowserModel: WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         guard navigationAction.targetFrame == nil else { return nil }
         let clicked = navigationAction.navigationType == .linkActivated
+        if !clicked, security.filtering, let source = tab(for: webView), !security.isAllowed(source.currentURL?.host) {
+            let hijacks = Date().timeIntervalSince(source.security.lastGesture) > 1.5
+            if hijacks {
+                security.notePopup(url: navigationAction.request.url, tab: source.security, blocked: security.blocking)
+                if security.blocking { statusMessage = "Firewall stopped a pop-up the page opened by itself."; return nil }
+            }
+        }
         let tab = makeTab()
         tab.openedByScript = !clicked
         tabs.append(tab)
@@ -1021,6 +1107,12 @@ extension BrowserModel: WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
                   completionHandler: @escaping @MainActor (URL?) -> Void) {
         guard let entry = active(download) else { completionHandler(nil); return }
         let sourceTab = tab(for: entry.frame?.webView) ?? selectedTab
+        if entry.item == nil, case .block(let reason) = security.reviewDownload(name: suggestedFilename, tab: sourceTab.security) {
+            activeDownloads.removeValue(forKey: ObjectIdentifier(download))
+            statusMessage = "Firewall stopped a download: \(reason)."
+            completionHandler(nil)
+            return
+        }
         // "Download Video" on an HLS player only gets the playlist (a text file listing the pieces).
         // Fetch the whole stream through the page instead and join it into one video.
         if MediaSniff.isHLS(mime: response.mimeType, url: response.url), let streamURL = response.url {
@@ -1145,6 +1237,7 @@ extension BrowserModel: WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
 
     private func finishSegmented(_ entry: ActiveDownload, _ result: Result<String, Error>) {
         defer { entry.segmentTask = nil }   // breaks the entry <-> task reference
+        if case .success(let path) = result { recordIntegrity(path, entry: entry) }
         entry.item?.lanes = []
         let cancelled = { () -> Bool in
             if case .failure(let e) = result { return e is CancellationError || (e as NSError).code == NSURLErrorCancelled }
@@ -1167,6 +1260,7 @@ extension BrowserModel: WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
         guard let entry = activeDownloads.removeValue(forKey: ObjectIdentifier(download)) else { return }
         entry.progressObservation = nil
         let path = entry.destination.map { addMissingExtension($0.path) } ?? ""
+        if !path.isEmpty { recordIntegrity(path, entry: entry) }
         if entry.continuation != nil {
             entry.resume(.success(path))
         } else if let item = entry.item {

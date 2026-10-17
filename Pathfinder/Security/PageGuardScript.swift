@@ -1,0 +1,437 @@
+import Foundation
+
+/// The script injected into every page and frame before the page's own code runs. It watches the page's network
+/// calls (the API list), looks for attack payloads in what leaves the browser, and checks the page for the
+/// signs of web shells, hidden click-hijack layers, miners and risky scripts. Everything it finds goes to the app
+/// through the `pfSecurity` message handler; the app decides what to show.
+enum PageGuardScript {
+    static let handlerName = "pfSecurity"
+
+    static func source(mode: WAFMode, allowedHosts: [String]) -> String {
+        let minerPattern = WAFRules.minerHosts.map { $0.replacingOccurrences(of: ".", with: "\\\\.") }.joined(separator: "|")
+        return template
+            .replacingOccurrences(of: "%MODE%", with: mode.rawValue)
+            .replacingOccurrences(of: "%RULES%", with: WAFRules.json)
+            .replacingOccurrences(of: "%MINERHOSTS%", with: minerPattern)
+            .replacingOccurrences(of: "%ALLOWED%", with: (try? JSONSerialization.data(withJSONObject: allowedHosts)).map { String(decoding: $0, as: UTF8.self) } ?? "[]")
+    }
+
+    private static let template = #"""
+    (function () {
+      if (window.__pfSec) return;
+      window.__pfSec = true;
+      var MODE = '%MODE%';
+      var ALLOWED = %ALLOWED%;
+      var topHost = (function () {
+        try {
+          if (location.ancestorOrigins && location.ancestorOrigins.length) {
+            return new URL(location.ancestorOrigins[location.ancestorOrigins.length - 1]).hostname;
+          }
+        } catch (e) {}
+        return location.hostname;
+      })();
+      // Sites the user chose to trust are not filtered.
+      var BYPASS = ALLOWED.indexOf(String(topHost).toLowerCase().replace(/^www\./, '')) !== -1;
+      var RULES = %RULES%;
+      var isTop = window.top === window;
+      var seen = {};
+      var seenCount = 0;
+      var origin = location.origin;
+
+      function post(o) {
+        try { window.webkit.messageHandlers.pfSecurity.postMessage(o); } catch (e) {}
+      }
+      function emit(kind, sev, title, detail, blocked) {
+        var key = kind + '|' + title + '|' + String(detail || '').slice(0, 60);
+        if (seen[key] || seenCount > 150) return;
+        seen[key] = 1; seenCount++;
+        post({ t: 'finding', kind: kind, sev: sev, title: title, detail: String(detail || '').slice(0, 300),
+               blocked: !!blocked, frame: location.href.slice(0, 200) });
+      }
+      function abs(u) { try { return new URL(String(u), location.href).href; } catch (e) { return String(u); } }
+
+      // ---------- user gestures: a click or key press is what makes a pop-up or download legitimate ----------
+      var lastGesture = 0, lastSent = 0;
+      function gesture(e) {
+        if (!e.isTrusted) return;
+        lastGesture = Date.now();
+        if (lastGesture - lastSent > 250) { lastSent = lastGesture; post({ t: 'gesture' }); }
+      }
+      ['pointerdown', 'mousedown', 'keydown', 'touchstart'].forEach(function (n) {
+        window.addEventListener(n, gesture, true);
+      });
+      function hasGesture() { return Date.now() - lastGesture < 1500; }
+
+      // ---------- firewall: attack patterns in what the page sends ----------
+      var compiled = RULES.map(function (r) {
+        try { return { id: r.id, cat: r.cat, name: r.name, sev: r.sev, re: new RegExp(r.re, 'i') }; } catch (e) { return null; }
+      }).filter(Boolean);
+      function decode(s) {
+        s = String(s).replace(/\+/g, ' ');
+        for (var i = 0; i < 3; i++) {
+          try { var d = decodeURIComponent(s); if (d === s) break; s = d; } catch (e) { break; }
+        }
+        return s;
+      }
+      function scan(text) {
+        if (!text) return [];
+        var d = decode(String(text).slice(0, 20000));
+        return compiled.filter(function (r) { return r.re.test(d); });
+      }
+      function guardText(where, text) {
+        if (MODE === 'off' || BYPASS) return false;
+        var hits = scan(text);
+        if (!hits.length) return false;
+        var top = hits.reduce(function (a, b) { return (b.sev === 'high' && a.sev !== 'high') ? b : a; });
+        var blocked = MODE === 'block' && top.sev !== 'low';
+        var snippet = decode(String(text)).replace(/\s+/g, ' ').slice(0, 120);
+        emit('injection', top.sev, top.cat + ': ' + top.name + ' in ' + where, snippet, blocked);
+        return blocked;
+      }
+      function bodyText(b) {
+        if (b == null) return '';
+        if (typeof b === 'string') return b;
+        if (b instanceof URLSearchParams) return b.toString();
+        if (typeof FormData !== 'undefined' && b instanceof FormData) {
+          var parts = [];
+          b.forEach(function (v, k) { if (typeof v === 'string') parts.push(k + '=' + v); });
+          return parts.join('&');
+        }
+        return '';
+      }
+
+      // ---------- API monitor ----------
+      var perKey = {};
+      function apiStart(kind, method, url) {
+        var full = abs(url);
+        var key = kind + ' ' + method + ' ' + full.split('?')[0];
+        var n = perKey[key] = (perKey[key] || 0) + 1;
+        var report = n <= 5 || n % 25 === 0;
+        if (report) post({ t: 'api', phase: 'start', kind: kind, method: method, url: full.slice(0, 400), n: n });
+        var begin = performance.now();
+        return {
+          report: report,
+          end: function (status, ctype, failed, blocked) {
+            if (!report) return;
+            post({ t: 'api', phase: 'end', kind: kind, method: method, url: full.slice(0, 400), status: status || 0,
+                   ms: Math.round(performance.now() - begin), ctype: (ctype || '').split(';')[0], failed: !!failed, blocked: !!blocked });
+          }
+        };
+      }
+
+      var origFetch = window.fetch;
+      if (origFetch) {
+        window.fetch = function (input, init) {
+          var url = typeof input === 'string' ? input : (input && input.url) || String(input);
+          var method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+          var tracker = apiStart('fetch', method, url);
+          var blocked = guardText('request to ' + abs(url).split('?')[0], abs(url).replace(/^[a-z]+:\/\/[^\/]*/i, '') + ' ' + bodyText(init && init.body));
+          if (blocked) {
+            tracker.end(0, '', true, true);
+            return Promise.reject(new TypeError('Blocked by the Pathfinder firewall'));
+          }
+          return origFetch.apply(this, arguments).then(function (r) {
+            try { tracker.end(r.status, r.headers.get('content-type'), !r.ok && r.status >= 500, false); } catch (e) {}
+            return r;
+          }, function (err) { tracker.end(0, '', true, false); throw err; });
+        };
+      }
+
+      var xOpen = XMLHttpRequest.prototype.open, xSend = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function (method, url) {
+        this.__pf = { method: String(method || 'GET').toUpperCase(), url: url };
+        return xOpen.apply(this, arguments);
+      };
+      XMLHttpRequest.prototype.send = function (body) {
+        var info = this.__pf;
+        if (info) {
+          var tracker = apiStart('XHR', info.method, info.url);
+          var blocked = guardText('request to ' + abs(info.url).split('?')[0], abs(info.url).replace(/^[a-z]+:\/\/[^\/]*/i, '') + ' ' + bodyText(body));
+          if (blocked) { tracker.end(0, '', true, true); throw new DOMException('Blocked by the Pathfinder firewall', 'NetworkError'); }
+          var xhr = this;
+          xhr.addEventListener('loadend', function () {
+            try { tracker.end(xhr.status, xhr.getResponseHeader('content-type'), xhr.status === 0 || xhr.status >= 500, false); } catch (e) {}
+          });
+        }
+        return xSend.apply(this, arguments);
+      };
+
+      var origBeacon = navigator.sendBeacon;
+      if (origBeacon) {
+        navigator.sendBeacon = function (url, data) {
+          var tracker = apiStart('Beacon', 'POST', url);
+          tracker.end(204, '', false, false);
+          return origBeacon.apply(this, arguments);
+        };
+      }
+
+      var minerHost = new RegExp('(^|[./])(%MINERHOSTS%)', 'i');
+      var stratumLike = /stratum\+|\b(xmr|monero|supportxmr|nanopool|minexmr|hashvault|moneroocean|cryptonight)\b/i;
+      var NativeWS = window.WebSocket;
+      if (NativeWS) {
+        var PatchedWS = function (url, protocols) {
+          var full = abs(url);
+          if (minerHost.test(full) || stratumLike.test(full)) {
+            emit('cryptojacking', 'high', 'Mining pool connection', full, MODE === 'block' && !BYPASS);
+            if (MODE === 'block' && !BYPASS) throw new DOMException('Blocked by the Pathfinder firewall', 'SecurityError');
+          }
+          var ws = protocols === undefined ? new NativeWS(url) : new NativeWS(url, protocols);
+          var tracker = apiStart('WebSocket', 'GET', full);
+          post({ t: 'api', phase: 'open', kind: 'WebSocket', method: 'GET', url: full.slice(0, 400) });
+          var origSend = ws.send;
+          ws.send = function (data) {
+            if (typeof data === 'string') {
+              if (/"(method|type)"\s*:\s*"(login|auth)"/.test(data) && /"(agent|pass|job|algo)"/.test(data)) {
+                emit('cryptojacking', 'high', 'Mining protocol over WebSocket', data.slice(0, 120), false);
+              }
+              guardText('WebSocket message', data);
+            }
+            return origSend.apply(this, arguments);
+          };
+          ws.addEventListener('close', function () {
+            post({ t: 'api', phase: 'close', kind: 'WebSocket', method: 'GET', url: full.slice(0, 400) });
+            tracker.end(101, '', false, false);
+          });
+          return ws;
+        };
+        PatchedWS.prototype = NativeWS.prototype;
+        ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'].forEach(function (k) { PatchedWS[k] = NativeWS[k]; });
+        window.WebSocket = PatchedWS;
+      }
+
+      var NativeES = window.EventSource;
+      if (NativeES) {
+        var PatchedES = function (url, cfg) {
+          var full = abs(url);
+          var es = new NativeES(url, cfg);
+          apiStart('SSE', 'GET', full);
+          post({ t: 'api', phase: 'open', kind: 'SSE', method: 'GET', url: full.slice(0, 400) });
+          var close = es.close;
+          es.close = function () {
+            post({ t: 'api', phase: 'close', kind: 'SSE', method: 'GET', url: full.slice(0, 400) });
+            return close.apply(this, arguments);
+          };
+          return es;
+        };
+        PatchedES.prototype = NativeES.prototype;
+        window.EventSource = PatchedES;
+      }
+
+      // ---------- forms: payloads typed or injected into fields ----------
+      document.addEventListener('submit', function (e) {
+        var form = e.target;
+        if (!form || !form.elements) return;
+        var parts = [];
+        for (var i = 0; i < form.elements.length; i++) {
+          var el = form.elements[i];
+          if (!el.name || el.type === 'password' || el.type === 'file' || typeof el.value !== 'string') continue;
+          parts.push(el.name + '=' + el.value);
+        }
+        if (guardText('form submission', parts.join('&'))) {
+          e.preventDefault(); e.stopImmediatePropagation();
+        }
+        try {
+          var action = abs(form.action || location.href);
+          if (action.indexOf('http://') === 0 && form.querySelector('input[type=password]')) {
+            emit('transport', 'high', 'Password sent over an unencrypted connection', action, false);
+          }
+        } catch (err) {}
+      }, true);
+
+      // ---------- pop-ups and programmatic clicks nobody asked for ----------
+      var origOpen = window.open;
+      window.open = function (url) {
+        if (!hasGesture()) {
+          var blocked = MODE === 'block' && !BYPASS;
+          emit('malvertising', 'medium', 'Pop-up opened without a click', url ? abs(url) : '(blank)', blocked);
+          if (blocked) return null;
+        }
+        return origOpen.apply(this, arguments);
+      };
+      var origClick = HTMLElement.prototype.click;
+      HTMLElement.prototype.click = function () {
+        try {
+          if (this instanceof HTMLAnchorElement && !hasGesture()) {
+            var href = abs(this.href || '');
+            var isDownload = this.hasAttribute('download') || /\.(exe|msi|dmg|pkg|scr|bat|cmd|jar|apk|ps1|vbs|hta|lnk|iso|sh|command)(\?|#|$)/i.test(href);
+            if (isDownload) {
+              var blocked = MODE === 'block' && !BYPASS;
+              emit('driveBy', 'high', 'Script clicked a download link by itself', href, blocked);
+              if (blocked) return;
+            } else if (this.target === '_blank' || (href && new URL(href).origin !== origin)) {
+              var blockedNav = MODE === 'block' && !BYPASS && this.target === '_blank';
+              emit('malvertising', 'medium', 'Script clicked a link by itself', href, blockedNav);
+              if (blockedNav) return;
+            }
+          }
+        } catch (e) {}
+        return origClick.apply(this, arguments);
+      };
+
+      // ---------- obfuscated code ----------
+      function looksObfuscated(code) {
+        var s = String(code);
+        if (/^\s*eval\(function\(p,a,c,k,e,[dr]\)/.test(s) || /\}\('.{200,}',\d+,\d+,'/.test(s)) return 'packed script (p,a,c,k,e,d)';
+        if ((s.match(/_0x[0-9a-f]{4,6}/g) || []).length > 30) return 'obfuscator.io style identifiers';
+        if (/(\\x[0-9a-f]{2}){24,}/i.test(s)) return 'long hex-escaped string';
+        if (/(\\u[0-9a-f]{4}){24,}/i.test(s)) return 'long unicode-escaped string';
+        return null;
+      }
+      var origEval = window.eval;
+      window.eval = function (code) {
+        try {
+          if (typeof code === 'string') {
+            var why = looksObfuscated(code);
+            if (why) emit('malvertising', 'low', 'Obfuscated code run with eval', why, false);
+            if (/coinhive|cryptonight|CryptoLoot|new\s+CoinHive/i.test(code)) emit('cryptojacking', 'high', 'Miner code run with eval', code.slice(0, 100), false);
+          }
+        } catch (e) {}
+        return origEval.apply(this, arguments);
+      };
+
+      // ---------- cryptojacking: workers and miner scripts ----------
+      var minerName = /(coin-?hive|crypto-?loot|coinimp|web-?miner|deep-?miner|jsecoin|authedmine|minero|webmr|cryptonight|monero-?miner|xmr-?(stak|rig|miner)|cn-?wasm)/i;
+      var NativeWorker = window.Worker;
+      if (NativeWorker) {
+        var PatchedWorker = function (url, opts) {
+          try {
+            var full = abs(url);
+            if (minerName.test(full) || minerHost.test(full)) {
+              var stop = MODE === 'block' && !BYPASS;
+              emit('cryptojacking', 'high', 'Mining worker started', full, stop);
+              if (stop) throw new DOMException('Blocked by the Pathfinder firewall', 'SecurityError');
+            }
+          } catch (e) { if (e && e.name === 'SecurityError') throw e; }
+          return opts === undefined ? new NativeWorker(url) : new NativeWorker(url, opts);
+        };
+        PatchedWorker.prototype = NativeWorker.prototype;
+        window.Worker = PatchedWorker;
+      }
+
+      // ---------- page checks (after the page has had time to build itself) ----------
+      var WEBSHELL_NAMES = /(c99|r57|wso|b374k|webshell|web shell|filesman|china chopper|alfa team|alfashell|indoxploit|mini shell|p0wny|weevely|phpspy|php shell|safe0ver|antichat|ani-shell|dhanush|sym403)/i;
+      var WEBSHELL_PATH = /(^|\/)(c99|r57|wso|b374k|alfa|indoxploit|filesman|webshell|backdoor|p0wny|phpspy|shell|cmd|mini)[\w.-]*\.(php\d?|phtml|asp|aspx|jsp|jspx|cfm)(\?|$)/i;
+
+      function checkWebShell() {
+        if (!isTop) return;
+        var score = 0, why = [];
+        var title = document.title || '';
+        var text = (document.body && document.body.innerText || '').slice(0, 6000);
+        if (WEBSHELL_NAMES.test(title)) { score += 3; why.push('title "' + title.slice(0, 40) + '"'); }
+        var m = text.match(WEBSHELL_NAMES);
+        if (m) { score += 2; why.push('page text mentions "' + m[0] + '"'); }
+        if (WEBSHELL_PATH.test(location.pathname)) { score += 1; why.push('file name ' + location.pathname.split('/').pop()); }
+        if (/\/wp-content\/(uploads|upgrade)\/.+\.(php|phtml)(\?|$)/i.test(location.pathname)) { score += 2; why.push('PHP file inside wp-content/uploads'); }
+        var cmdInput = document.querySelector('input[name=cmd], input[name=command], input[name=exec], textarea[name=cmd], input[name=c], input[name=execute]');
+        if (cmdInput) { score += 2; why.push('command input field'); }
+        if (/(uname -a|Safe-?mode|Server IP|\buid=\d+\(.+\)\s+gid=\d+|\[ ?Sec\. Info ?\]|Execute command|File ?Manager.*(Upload|Chmod)|Php ?Info.*Sql)/i.test(text)) { score += 2; why.push('shell-style output on the page'); }
+        if (document.querySelector('input[type=file]') && cmdInput) { score += 1; why.push('upload form next to a command box'); }
+        if (score >= 3) emit('webShell', score >= 5 ? 'high' : 'medium', 'This page looks like a web shell', why.join('; '), false);
+      }
+
+      function checkRedirects() {
+        if (!isTop) return;
+        var metas = document.querySelectorAll('meta[http-equiv]');
+        for (var i = 0; i < metas.length; i++) {
+          if (String(metas[i].httpEquiv).toLowerCase() !== 'refresh') continue;
+          var m = String(metas[i].content).match(/^\s*(\d+(?:\.\d+)?)\s*[;,]\s*(?:url\s*=\s*)?['"]?([^'"]+)/i);
+          if (!m) continue;
+          var target = abs(m[2]);
+          try {
+            if (new URL(target).origin !== origin) {
+              emit('redirect', parseFloat(m[1]) <= 1 ? 'high' : 'medium', 'Page redirects to another site on its own',
+                   'meta refresh after ' + m[1] + ' s to ' + target, false);
+            }
+          } catch (e) {}
+        }
+        // A page that is nothing but a frame to another site is a common cloaking / redirect shell.
+        var frames = document.querySelectorAll('iframe');
+        var text = (document.body && document.body.innerText || '').trim();
+        if (frames.length === 1 && text.length < 20) {
+          var f = frames[0], r = f.getBoundingClientRect();
+          try {
+            if (r.width >= innerWidth * 0.9 && r.height >= innerHeight * 0.9 && f.src && new URL(abs(f.src)).origin !== origin) {
+              emit('redirect', 'medium', 'Page is only a full-window frame of another site', abs(f.src), false);
+            }
+          } catch (e) {}
+        }
+      }
+
+      function checkOverlays() {
+        if (!isTop || !document.body) return;
+        var w = innerWidth, h = innerHeight;
+        var pts = [[w / 2, h / 2], [w * 0.25, h * 0.25], [w * 0.75, h * 0.75]];
+        for (var i = 0; i < pts.length; i++) {
+          var el = document.elementFromPoint(pts[i][0], pts[i][1]);
+          if (!el || el === document.body || el === document.documentElement) continue;
+          var cs = getComputedStyle(el), r = el.getBoundingClientRect();
+          var covers = r.width >= w * 0.85 && r.height >= h * 0.85;
+          var pos = cs.position === 'fixed' || cs.position === 'absolute';
+          var invisible = parseFloat(cs.opacity) < 0.05 || cs.backgroundColor === 'rgba(0, 0, 0, 0)' && !el.textContent.trim() && !el.querySelector('img,video,canvas,svg');
+          var clickable = el.tagName === 'A' || el.tagName === 'IFRAME' || !!el.onclick || el.getAttribute('onclick') || el.closest('a');
+          if (covers && pos && invisible && clickable && parseInt(cs.zIndex || '0', 10) > 100) {
+            emit('malvertising', 'high', 'Invisible full-page layer will catch your clicks',
+                 el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (el.src ? ' → ' + abs(el.src) : el.href ? ' → ' + abs(el.href) : ''), false);
+            return;
+          }
+        }
+      }
+
+      function checkMiners() {
+        var scripts = document.querySelectorAll('script[src], iframe[src]');
+        for (var i = 0; i < scripts.length; i++) {
+          var src = abs(scripts[i].src);
+          if (minerName.test(src) || minerHost.test(src)) emit('cryptojacking', 'high', 'Miner script on this page', src, false);
+        }
+        var globals = ['CoinHive', 'CryptoLoot', 'CoinImp', 'deepMiner', 'JSECoin', 'Client'];
+        for (var j = 0; j < globals.length; j++) {
+          try {
+            var g = window[globals[j]];
+            if (g && (g.Anonymous || g.User || g.Token) && typeof g === 'object' && globals[j] !== 'Client') {
+              emit('cryptojacking', 'high', 'Miner library loaded', globals[j], false);
+            } else if (globals[j] === 'Client' && g && typeof g.Anonymous === 'function') {
+              emit('cryptojacking', 'high', 'Miner library loaded', 'Client.Anonymous', false);
+            }
+          } catch (e) {}
+        }
+      }
+
+      function checkUrlPayload() {
+        if (!isTop) return;
+        if (MODE === 'off' || BYPASS) return;
+        var query = location.search + location.hash;
+        var hits = scan(location.pathname + query).filter(function (r) { return r.cat === 'XSS'; });
+        if (!hits.length) return;
+        // Reflected: the payload from the address is now part of the page's markup.
+        var html = document.documentElement.innerHTML;
+        var params = new URLSearchParams(location.search + '&' + location.hash.replace(/^#/, ''));
+        params.forEach(function (v) {
+          if (v.length < 8) return;
+          var dv = decode(v);
+          if (scan(dv).some(function (r) { return r.cat === 'XSS'; }) && html.indexOf(dv) !== -1) {
+            emit('injection', 'high', 'Reflected XSS: the page echoed a script payload from its address', dv.slice(0, 120), false);
+          }
+        });
+      }
+
+      function run() {
+        try { checkMiners(); checkWebShell(); checkRedirects(); checkUrlPayload(); } catch (e) {}
+        setTimeout(function () { try { checkOverlays(); checkMiners(); } catch (e) {} }, 2000);
+        setTimeout(function () { try { checkOverlays(); checkMiners(); } catch (e) {} }, 6000);
+      }
+      if (isTop) {
+        try {
+          if (!BYPASS && MODE !== 'off') {
+            var urlHits = scan(location.pathname + location.search + location.hash);
+            if (urlHits.length) {
+              var worst = urlHits.reduce(function (a, b) { return (b.sev === 'high' && a.sev !== 'high') ? b : a; });
+              emit('injection', worst.sev, worst.cat + ': ' + worst.name + ' in this page\'s address', decode(location.pathname + location.search).slice(0, 120), false);
+            }
+          }
+        } catch (e) {}
+      }
+      if (document.readyState === 'complete') setTimeout(run, 300);
+      else window.addEventListener('load', function () { setTimeout(run, 300); });
+    })();
+    """#
+}

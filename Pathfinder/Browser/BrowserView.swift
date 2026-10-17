@@ -438,6 +438,8 @@ struct BrowserView: View {
             .help(browser.verticalTabs ? "Move tabs to the top" : "Move tabs to the side")
             .accessibilityLabel("Toggle side tabs")
 
+            SecurityButton()
+
             Button { browser.setAdBlock(!browser.adBlockEnabled) } label: {
                 Image(systemName: browser.adBlockEnabled ? "shield.lefthalf.filled" : "shield.slash")
                     .foregroundStyle(browser.adBlockEnabled ? Theme.accentText : Theme.text3)
