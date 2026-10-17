@@ -199,43 +199,92 @@ private struct FindingRow: View {
 
 // MARK: - APIs
 
+private func copyToPasteboard(_ text: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
+}
+
 private struct APIList: View {
     @Environment(BrowserModel.self) private var browser
+    enum Scope: String, CaseIterable, Identifiable { case page = "This page", sites = "All sites"; var id: String { rawValue } }
+    @State private var scope = Scope.page
     @State private var onlyActive = false
+    @State private var showAds = false
+    @State private var withCookies = true
     @State private var query = ""
+    @State private var copied: String?
 
     var body: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $scope) { ForEach(Scope.allCases) { Text($0.rawValue).tag($0) } }
+                .pickerStyle(.segmented).labelsHidden().padding(.horizontal, 10).padding(.top, 8)
+            if scope == .page { pageList } else { SitesList() }
+        }
+    }
+
+    private var pageList: some View {
         let tab = browser.selectedTab.security
         let list = tab.sortedEndpoints.filter { e in
-            (!onlyActive || e.isActive) && (query.isEmpty || e.id.localizedCaseInsensitiveContains(query))
+            (showAds || !e.isAd) && (!onlyActive || e.isActive) && (query.isEmpty || e.id.localizedCaseInsensitiveContains(query))
         }
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                TextField("Filter", text: $query).textFieldStyle(.roundedBorder).font(.system(size: 12))
-                Toggle("Active only", isOn: $onlyActive).toggleStyle(.checkbox).font(.system(size: 12))
-                Text("\(tab.activeCount) active · \(tab.endpoints.count) total").font(.system(size: 11)).foregroundStyle(Theme.text3)
+        return VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    TextField("Filter", text: $query).textFieldStyle(.roundedBorder).font(.system(size: 12))
+                    Button(copied == "all" ? "Copied" : "Copy all cURL") { copyAll(list) }
+                        .disabled(list.isEmpty).font(.system(size: 12))
+                }
+                HStack(spacing: 12) {
+                    Toggle("Active only", isOn: $onlyActive)
+                    Toggle(tab.adCount > 0 ? "Show ads & trackers (\(tab.adCount) hidden)" : "Show ads & trackers", isOn: $showAds)
+                    Toggle("Include cookies", isOn: $withCookies).help("Add the browser's cookies for the address to the copied cURL")
+                    Spacer()
+                    Text("\(tab.activeCount) active").font(.system(size: 11)).foregroundStyle(Theme.text3)
+                }
+                .toggleStyle(.checkbox).font(.system(size: 11.5))
             }
             .padding(10)
             Divider()
             if list.isEmpty {
                 Spacer()
                 Text(tab.endpoints.isEmpty ? "No API calls yet. Calls made by the page (fetch, XHR, WebSocket, event streams) appear here."
-                     : "Nothing matches.")
+                     : "Nothing to show. Ads and trackers are hidden; change the filters above.")
                     .font(.system(size: 12)).foregroundStyle(Theme.text3).multilineTextAlignment(.center).padding(30)
                 Spacer()
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(list) { APIRow(endpoint: $0); Divider() }
+                        ForEach(list) { APIRow(endpoint: $0, withCookies: withCookies); Divider() }
                     }
                 }
             }
         }
     }
+
+    private func copyAll(_ list: [APIEndpoint]) {
+        let agent = browser.webView.customUserAgent
+        let store = browser.webView.configuration.websiteDataStore.httpCookieStore
+        let useCookies = withCookies
+        Task {
+            var blocks: [String] = []
+            for e in list {
+                let cookie = useCookies ? await CurlBuilder.cookie(forURL: e.fullURL, store: store) : nil
+                blocks.append(CurlBuilder.command(for: e, userAgent: agent, cookie: cookie))
+            }
+            copyToPasteboard(blocks.joined(separator: "\n\n"))
+            copied = "all"
+            try? await Task.sleep(for: .seconds(1.5))
+            copied = nil
+        }
+    }
 }
 
 private struct APIRow: View {
+    @Environment(BrowserModel.self) private var browser
     let endpoint: APIEndpoint
+    let withCookies: Bool
+    @State private var expanded = false
+    @State private var copied = false
 
     private var statusColor: Color {
         if endpoint.blocked { return Theme.dangerText }
@@ -244,33 +293,163 @@ private struct APIRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 8) {
-            Circle().fill(endpoint.isActive ? Theme.success : Theme.track).frame(width: 7, height: 7)
-                .help(endpoint.isActive ? "In use right now" : "Idle")
-            Text(endpoint.kind == .websocket || endpoint.kind == .sse ? endpoint.kind.rawValue : endpoint.method)
-                .font(.system(size: 10.5, weight: .bold, design: .monospaced)).foregroundStyle(Theme.accentText)
-                .frame(width: 62, alignment: .leading)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(endpoint.path).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.text).lineLimit(1)
-                HStack(spacing: 5) {
-                    Text(endpoint.host)
-                    if endpoint.isThirdParty { Text("third party").foregroundStyle(Theme.warnText) }
-                    if let type = endpoint.lastType { Text(type) }
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.system(size: 9)).foregroundStyle(Theme.text3).frame(width: 10)
+                Circle().fill(endpoint.isActive ? Theme.success : Theme.track).frame(width: 7, height: 7)
+                    .help(endpoint.isActive ? "In use right now" : "Idle")
+                Text(endpoint.kind == .websocket || endpoint.kind == .sse ? endpoint.kind.rawValue : endpoint.method)
+                    .font(.system(size: 10.5, weight: .bold, design: .monospaced)).foregroundStyle(Theme.accentText)
+                    .frame(width: 58, alignment: .leading)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(endpoint.path).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.text).lineLimit(1)
+                    HStack(spacing: 5) {
+                        Text(endpoint.host)
+                        if endpoint.isAd { Text("ad / tracker").foregroundStyle(Theme.dangerText) }
+                        else if endpoint.isThirdParty { Text("third party").foregroundStyle(Theme.warnText) }
+                        if let type = endpoint.lastType { Text(type) }
+                    }
+                    .font(.system(size: 10.5)).foregroundStyle(Theme.text3).lineLimit(1)
                 }
-                .font(.system(size: 10.5)).foregroundStyle(Theme.text3).lineLimit(1)
+                Spacer(minLength: 4)
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text(endpoint.blocked ? "blocked" : endpoint.lastStatus.map(String.init) ?? (endpoint.isActive ? "…" : "–"))
+                        .font(.system(size: 11.5, weight: .semibold, design: .monospaced)).foregroundStyle(statusColor)
+                    Text("×\(endpoint.count)" + (endpoint.lastMillis.map { " · \($0) ms" } ?? ""))
+                        .font(.system(size: 10.5)).foregroundStyle(Theme.text3)
+                }
+                Button { copyCurl() } label: { Text(copied ? "Copied" : "cURL").font(.system(size: 11, weight: .medium)) }
+                    .buttonStyle(.bordered).controlSize(.small).help("Copy this call as a cURL command")
             }
-            Spacer(minLength: 4)
-            VStack(alignment: .trailing, spacing: 1) {
-                Text(endpoint.blocked ? "blocked" : endpoint.lastStatus.map(String.init) ?? (endpoint.isActive ? "…" : "–"))
-                    .font(.system(size: 11.5, weight: .semibold, design: .monospaced)).foregroundStyle(statusColor)
-                Text("×\(endpoint.count)" + (endpoint.lastMillis.map { " · \($0) ms" } ?? ""))
-                    .font(.system(size: 10.5)).foregroundStyle(Theme.text3)
-            }
+            .contentShape(Rectangle())
+            .onTapGesture { withAnimation(.easeOut(duration: 0.12)) { expanded.toggle() } }
+            if expanded { details.padding(.leading, 28).padding(.top, 8) }
         }
         .padding(.horizontal, 12).padding(.vertical, 7)
         .contextMenu {
-            Button("Copy URL") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(endpoint.fullURL, forType: .string) }
+            Button("Copy cURL") { copyCurl() }
+            Button("Copy URL") { copyToPasteboard(endpoint.fullURL) }
         }
+    }
+
+    private func copyCurl() {
+        let agent = browser.webView.customUserAgent
+        let store = browser.webView.configuration.websiteDataStore.httpCookieStore
+        let e = endpoint, useCookies = withCookies
+        Task {
+            let cookie = useCookies ? await CurlBuilder.cookie(forURL: e.fullURL, store: store) : nil
+            copyToPasteboard(CurlBuilder.command(for: e, userAgent: agent, cookie: cookie))
+            copied = true
+            try? await Task.sleep(for: .seconds(1.5))
+            copied = false
+        }
+    }
+
+    private var query: [URLQueryItem] { URLComponents(string: endpoint.fullURL)?.queryItems ?? [] }
+
+    @ViewBuilder
+    private var details: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            block("URL", endpoint.fullURL)
+            if !query.isEmpty {
+                block("Query parameters", query.map { "\($0.name) = \($0.value ?? "")" }.joined(separator: "\n"))
+            }
+            if !endpoint.sample.requestHeaders.isEmpty {
+                block("Request headers", endpoint.sample.requestHeaders.map { "\($0.name): \($0.value)" }.joined(separator: "\n"))
+            }
+            if let body = endpoint.sample.requestBody, !body.isEmpty { block("Request body", body) }
+            if !endpoint.sample.responseHeaders.isEmpty {
+                block("Response headers", endpoint.sample.responseHeaders.map { "\($0.name): \($0.value)" }.joined(separator: "\n"))
+            }
+            if let preview = endpoint.sample.responsePreview, !preview.isEmpty { block("Response preview", Self.pretty(preview)) }
+            if endpoint.sample.requestHeaders.isEmpty && endpoint.sample.responseHeaders.isEmpty && endpoint.sample.requestBody == nil {
+                Text("No headers captured for this kind of call.").font(.system(size: 11)).foregroundStyle(Theme.text3)
+            }
+            Text("Captured in memory for this visit only. Headers added by the browser itself (such as cookies) are not visible to the page.")
+                .font(.system(size: 10.5)).foregroundStyle(Theme.text3)
+        }
+    }
+
+    private func block(_ title: String, _ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Theme.text3)
+            Text(text).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.text2)
+                .lineLimit(14).textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(6)
+                .background(Theme.surface2, in: RoundedRectangle(cornerRadius: 6))
+        }
+    }
+
+    static func pretty(_ text: String) -> String {
+        guard let data = text.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data),
+              let out = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]) else { return text }
+        return String(decoding: out, as: UTF8.self)
+    }
+}
+
+/// Every site visited, with the backend endpoints found on it.
+private struct SitesList: View {
+    @Environment(BrowserModel.self) private var browser
+    @State private var query = ""
+
+    var body: some View {
+        let registry = browser.security.registry
+        let sites = registry.sortedSites.filter { query.isEmpty || $0.site.localizedCaseInsensitiveContains(query)
+            || $0.endpoints.contains { $0.host.localizedCaseInsensitiveContains(query) || $0.path.localizedCaseInsensitiveContains(query) } }
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                TextField("Search sites and endpoints", text: $query).textFieldStyle(.roundedBorder).font(.system(size: 12))
+                Text("\(registry.sites.count) sites").font(.system(size: 11)).foregroundStyle(Theme.text3)
+                Button("Clear") { registry.clear() }.font(.system(size: 12)).disabled(registry.sites.isEmpty)
+            }
+            .padding(10)
+            Divider()
+            if sites.isEmpty {
+                Spacer()
+                Text("The backend APIs of each site you visit are collected here. Ads and trackers are left out. Only host and path are kept on disk.")
+                    .font(.system(size: 12)).foregroundStyle(Theme.text3).multilineTextAlignment(.center).padding(30)
+                Spacer()
+            } else {
+                List {
+                    ForEach(sites, id: \.site) { entry in
+                        DisclosureGroup {
+                            ForEach(entry.endpoints) { e in
+                                RegisteredRow(endpoint: e)
+                            }
+                        } label: {
+                            HStack {
+                                Text(entry.site).font(.system(size: 12.5, weight: .medium))
+                                Spacer()
+                                Text("\(entry.endpoints.count) endpoints").font(.system(size: 11)).foregroundStyle(Theme.text3)
+                            }
+                            .contextMenu { Button("Forget this site") { registry.remove(site: entry.site) } }
+                        }
+                    }
+                }
+                .listStyle(.plain)
+            }
+        }
+    }
+}
+
+private struct RegisteredRow: View {
+    let endpoint: RegisteredEndpoint
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(endpoint.kind == "WebSocket" || endpoint.kind == "SSE" ? endpoint.kind : endpoint.method)
+                .font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundStyle(Theme.accentText)
+                .frame(width: 56, alignment: .leading)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(endpoint.path).font(.system(size: 11.5, design: .monospaced)).lineLimit(1)
+                Text(endpoint.host + (endpoint.thirdParty ? " · third party" : "")).font(.system(size: 10)).foregroundStyle(Theme.text3).lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            Text("×\(endpoint.count)").font(.system(size: 10.5)).foregroundStyle(Theme.text3)
+            Button("cURL") { copyToPasteboard("curl \(CurlBuilder.quote(endpoint.url)) \\\n  -X \(endpoint.method) \\\n  --compressed\n# Headers, body and query are only available while the page is open.") }
+                .buttonStyle(.bordered).controlSize(.mini)
+        }
+        .contextMenu { Button("Copy URL") { copyToPasteboard(endpoint.url) } }
     }
 }
 

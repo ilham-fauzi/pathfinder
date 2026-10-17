@@ -101,20 +101,67 @@ enum PageGuardScript {
       }
 
       // ---------- API monitor ----------
+      // Besides the address, each call keeps its headers and body, and the answer's headers and a text preview,
+      // so the app can rebuild it as a cURL command. Nothing is stored on disk by the page.
       var perKey = {};
-      function apiStart(kind, method, url) {
+      var MAX_BODY = 8192, MAX_PREVIEW = 4000;
+      function pairs(h) {
+        var out = [];
+        try {
+          if (!h) return out;
+          if (typeof Headers !== 'undefined' && h instanceof Headers) h.forEach(function (v, k) { out.push([k, String(v)]); });
+          else if (Array.isArray(h)) h.forEach(function (p) { out.push([String(p[0]), String(p[1])]); });
+          else Object.keys(h).forEach(function (k) { out.push([k, String(h[k])]); });
+        } catch (e) {}
+        return out.slice(0, 50);
+      }
+      function describeBody(b) {
+        try {
+          if (b == null) return null;
+          if (typeof b === 'string') return b.length > MAX_BODY ? b.slice(0, MAX_BODY) : b;
+          if (typeof URLSearchParams !== 'undefined' && b instanceof URLSearchParams) return b.toString().slice(0, MAX_BODY);
+          if (typeof FormData !== 'undefined' && b instanceof FormData) {
+            var parts = [];
+            b.forEach(function (v, k) { parts.push(k + '=' + (typeof v === 'string' ? v : '[file ' + (v.name || '') + ']')); });
+            return '[multipart] ' + parts.join('&').slice(0, MAX_BODY);
+          }
+          if (typeof Blob !== 'undefined' && b instanceof Blob) return '[binary ' + b.size + ' bytes]';
+          if (b.byteLength !== undefined) return '[binary ' + b.byteLength + ' bytes]';
+        } catch (e) {}
+        return '[body]';
+      }
+      function parseRawHeaders(raw) {
+        var out = [];
+        String(raw || '').trim().split(/[\r\n]+/).forEach(function (line) {
+          var i = line.indexOf(':');
+          if (i > 0) out.push([line.slice(0, i).trim(), line.slice(i + 1).trim()]);
+        });
+        return out.slice(0, 50);
+      }
+      function textual(ct) { return /json|text|xml|javascript|x-www-form|graphql/i.test(ct || ''); }
+
+      function apiStart(kind, method, url, req) {
         var full = abs(url);
         var key = kind + ' ' + method + ' ' + full.split('?')[0];
         var n = perKey[key] = (perKey[key] || 0) + 1;
         var report = n <= 5 || n % 25 === 0;
-        if (report) post({ t: 'api', phase: 'start', kind: kind, method: method, url: full.slice(0, 400), n: n });
+        if (report) {
+          var m = { t: 'api', phase: 'start', kind: kind, method: method, url: full.slice(0, 600), n: n, page: location.href.slice(0, 300) };
+          if (req) { m.headers = req.headers || []; m.body = req.body === undefined ? null : req.body; }
+          post(m);
+        }
         var begin = performance.now();
         return {
-          report: report,
+          report: report, kind: kind, method: method, url: full,
           end: function (status, ctype, failed, blocked) {
             if (!report) return;
-            post({ t: 'api', phase: 'end', kind: kind, method: method, url: full.slice(0, 400), status: status || 0,
+            post({ t: 'api', phase: 'end', kind: kind, method: method, url: full.slice(0, 600), status: status || 0,
                    ms: Math.round(performance.now() - begin), ctype: (ctype || '').split(';')[0], failed: !!failed, blocked: !!blocked });
+          },
+          response: function (status, headerPairs, preview) {
+            if (!report) return;
+            post({ t: 'api', phase: 'resp', kind: kind, method: method, url: full.slice(0, 600), status: status || 0,
+                   rheaders: headerPairs || [], preview: preview == null ? null : String(preview).slice(0, MAX_PREVIEW) });
           }
         };
       }
@@ -122,35 +169,65 @@ enum PageGuardScript {
       var origFetch = window.fetch;
       if (origFetch) {
         window.fetch = function (input, init) {
+          var isReq = typeof Request !== 'undefined' && input instanceof Request;
           var url = typeof input === 'string' ? input : (input && input.url) || String(input);
-          var method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
-          var tracker = apiStart('fetch', method, url);
+          var method = ((init && init.method) || (isReq && input.method) || 'GET').toUpperCase();
+          var headers = pairs((init && init.headers) || (isReq ? input.headers : null));
+          var body = init && init.body !== undefined ? describeBody(init.body) : undefined;
+          var tracker = apiStart('fetch', method, url, { headers: headers, body: body });
+          if (isReq && body === undefined && method !== 'GET' && method !== 'HEAD' && tracker.report) {
+            try {
+              input.clone().text().then(function (t) {
+                post({ t: 'api', phase: 'body', kind: 'fetch', method: method, url: tracker.url.slice(0, 600), body: t.slice(0, MAX_BODY) });
+              }, function () {});
+            } catch (e) {}
+          }
           var blocked = guardText('request to ' + abs(url).split('?')[0], abs(url).replace(/^[a-z]+:\/\/[^\/]*/i, '') + ' ' + bodyText(init && init.body));
           if (blocked) {
             tracker.end(0, '', true, true);
             return Promise.reject(new TypeError('Blocked by the Pathfinder firewall'));
           }
           return origFetch.apply(this, arguments).then(function (r) {
-            try { tracker.end(r.status, r.headers.get('content-type'), !r.ok && r.status >= 500, false); } catch (e) {}
+            try {
+              var ct = r.headers.get('content-type');
+              tracker.end(r.status, ct, !r.ok && r.status >= 500, false);
+              var hp = pairs(r.headers);
+              var len = Number(r.headers.get('content-length') || 0);
+              if (tracker.report && textual(ct) && (len === 0 || len < 300000)) {
+                r.clone().text().then(function (t) { tracker.response(r.status, hp, t); }, function () { tracker.response(r.status, hp, null); });
+              } else {
+                tracker.response(r.status, hp, null);
+              }
+            } catch (e) {}
             return r;
           }, function (err) { tracker.end(0, '', true, false); throw err; });
         };
       }
 
-      var xOpen = XMLHttpRequest.prototype.open, xSend = XMLHttpRequest.prototype.send;
+      var xOpen = XMLHttpRequest.prototype.open, xSend = XMLHttpRequest.prototype.send, xSetHeader = XMLHttpRequest.prototype.setRequestHeader;
       XMLHttpRequest.prototype.open = function (method, url) {
-        this.__pf = { method: String(method || 'GET').toUpperCase(), url: url };
+        this.__pf = { method: String(method || 'GET').toUpperCase(), url: url, headers: [] };
         return xOpen.apply(this, arguments);
+      };
+      XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+        try { if (this.__pf && this.__pf.headers.length < 50) this.__pf.headers.push([String(name), String(value)]); } catch (e) {}
+        return xSetHeader.apply(this, arguments);
       };
       XMLHttpRequest.prototype.send = function (body) {
         var info = this.__pf;
         if (info) {
-          var tracker = apiStart('XHR', info.method, info.url);
+          var tracker = apiStart('XHR', info.method, info.url, { headers: info.headers, body: describeBody(body) });
           var blocked = guardText('request to ' + abs(info.url).split('?')[0], abs(info.url).replace(/^[a-z]+:\/\/[^\/]*/i, '') + ' ' + bodyText(body));
           if (blocked) { tracker.end(0, '', true, true); throw new DOMException('Blocked by the Pathfinder firewall', 'NetworkError'); }
           var xhr = this;
           xhr.addEventListener('loadend', function () {
-            try { tracker.end(xhr.status, xhr.getResponseHeader('content-type'), xhr.status === 0 || xhr.status >= 500, false); } catch (e) {}
+            try {
+              var ct = xhr.getResponseHeader('content-type');
+              tracker.end(xhr.status, ct, xhr.status === 0 || xhr.status >= 500, false);
+              var preview = null;
+              if ((xhr.responseType === '' || xhr.responseType === 'text') && textual(ct)) preview = xhr.responseText;
+              tracker.response(xhr.status, parseRawHeaders(xhr.getAllResponseHeaders()), preview);
+            } catch (e) {}
           });
         }
         return xSend.apply(this, arguments);
@@ -159,7 +236,7 @@ enum PageGuardScript {
       var origBeacon = navigator.sendBeacon;
       if (origBeacon) {
         navigator.sendBeacon = function (url, data) {
-          var tracker = apiStart('Beacon', 'POST', url);
+          var tracker = apiStart('Beacon', 'POST', url, { headers: [], body: describeBody(data) });
           tracker.end(204, '', false, false);
           return origBeacon.apply(this, arguments);
         };

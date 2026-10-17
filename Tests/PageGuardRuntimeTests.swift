@@ -95,4 +95,23 @@ final class PageGuardRuntimeTests: XCTestCase {
         let c = await load("<html><body><img src=x onerror=alert(1)></body></html>", url: "https://site.test/s?q=\(payload)")
         XCTAssertFalse(c.findings("injection").isEmpty, "\(c.messages)")
     }
+
+    func testApiCallsCarryHeadersBodyAndResponse() async {
+        let c = await load("""
+        <html><body><script>
+        fetch('https://api.site.test/v1/items?id=7', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': 'abc' },
+                                                        body: JSON.stringify({ name: 'x' }) }).catch(function () {});
+        var x = new XMLHttpRequest(); x.open('PUT', 'https://api.site.test/v1/other'); x.setRequestHeader('X-Req', '1'); x.send('a=b');
+        </script></body></html>
+        """, wait: 1.5)
+        let starts = c.messages.filter { $0["t"] as? String == "api" && $0["phase"] as? String == "start" }
+        let post = starts.first { $0["method"] as? String == "POST" }
+        XCTAssertEqual(post?["body"] as? String, #"{"name":"x"}"#, "\(c.messages)")
+        let headers = (post?["headers"] as? [[String]]) ?? []
+        XCTAssertTrue(headers.contains(["Content-Type", "application/json"]) && headers.contains(["X-Token", "abc"]), "\(headers)")
+        XCTAssertEqual(post?["page"] as? String, "https://site.test/page")
+        let put = starts.first { $0["method"] as? String == "PUT" }
+        XCTAssertEqual(put?["body"] as? String, "a=b")
+        XCTAssertTrue(((put?["headers"] as? [[String]]) ?? []).contains(["X-Req", "1"]))
+    }
 }

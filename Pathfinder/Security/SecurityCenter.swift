@@ -24,7 +24,8 @@ final class TabSecurity {
         }
     }
 
-    var activeCount: Int { endpoints.values.filter(\.isActive).count }
+    var activeCount: Int { endpoints.values.filter { $0.isActive && !$0.isAd }.count }
+    var adCount: Int { endpoints.values.filter(\.isAd).count }
 
     func reset() {
         findings = []
@@ -73,6 +74,8 @@ final class SecurityCenter {
     /// Called when the page script has to be rebuilt (mode or trusted sites changed).
     @ObservationIgnored var onScriptsChanged: (() -> Void)?
     let integrity = FileIntegrityMonitor()
+    /// Backend APIs of every site visited, kept between launches.
+    let registry = APIRegistry()
 
     static func key(_ host: String?) -> String? {
         guard var h = host?.lowercased(), !h.isEmpty else { return nil }
@@ -124,13 +127,26 @@ final class SecurityCenter {
         let path = url.path.isEmpty ? "/" : url.path
         let id = "\(kind.rawValue) \(method) \(host)\(path)"
         let thirdParty = Self.site(of: host) != Self.site(of: pageHost ?? "")
+        let ad = TrafficFilter.isAdOrTracker(url)
         let phase = body["phase"] as? String
+        func pairs(_ key: String) -> [HeaderPair] {
+            (body[key] as? [[String]] ?? []).compactMap { $0.count == 2 ? HeaderPair(name: $0[0], value: $0[1]) : nil }
+        }
         tab.mutate(id, create: APIEndpoint(kind: kind, method: method, host: host, path: path, fullURL: raw)) { e in
             e.isThirdParty = thirdParty
+            e.isAd = ad
             switch phase {
             case "start":
                 e.inFlight += 1
                 e.count = max(e.count, body["n"] as? Int ?? e.count + 1)
+                // The latest call is what a cURL copy should reproduce.
+                e.sample = APISample(pageURL: body["page"] as? String, requestHeaders: pairs("headers"),
+                                     requestBody: body["body"] as? String)
+            case "body":
+                if let text = body["body"] as? String { e.sample.requestBody = text }
+            case "resp":
+                e.sample.responseHeaders = pairs("rheaders")
+                e.sample.responsePreview = body["preview"] as? String
             case "end":
                 e.inFlight = max(0, e.inFlight - 1)
                 if let status = body["status"] as? Int, status > 0 { e.lastStatus = status }
@@ -146,6 +162,9 @@ final class SecurityCenter {
             default:
                 break
             }
+        }
+        if !ad, phase != "resp", phase != "body", let endpoint = tab.endpoints[id], let site = Self.key(pageHost) {
+            registry.note(endpoint, site: site)
         }
     }
 

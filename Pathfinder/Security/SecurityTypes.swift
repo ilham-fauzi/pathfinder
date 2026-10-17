@@ -92,6 +92,25 @@ struct APIEndpoint: Identifiable, Equatable, Sendable {
     /// Used right now: a request is on its way, or a live connection is open.
     var isActive: Bool { inFlight > 0 || open }
     var isThirdParty = false
+    /// An advertising or tracking address: hidden from the list by default.
+    var isAd = false
+    var firstSeen = Date()
+    /// The latest call to this endpoint, kept in memory only (it can hold tokens and cookies).
+    var sample = APISample()
+}
+
+struct HeaderPair: Equatable, Hashable, Sendable {
+    let name: String
+    let value: String
+}
+
+/// What the page sent and what came back, enough to rebuild the call as a cURL command.
+struct APISample: Equatable, Sendable {
+    var pageURL: String?
+    var requestHeaders: [HeaderPair] = []
+    var requestBody: String?
+    var responseHeaders: [HeaderPair] = []
+    var responsePreview: String?
 }
 
 /// What the page's response headers say about the site's own protection.

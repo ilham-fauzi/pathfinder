@@ -161,3 +161,45 @@ final class SecurityTests: XCTestCase {
         XCTAssertEqual(FileIntegrityMonitor.hash(of: file.path), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
     }
 }
+
+final class APIToolsTests: XCTestCase {
+    func testAdsAndTrackersAreSeparatedFromBackendCalls() {
+        for ad in ["https://securepubads.g.doubleclick.net/gampad/ads?x=1", "https://www.google-analytics.com/g/collect?v=2",
+                   "https://example.com/pagead/adview?ai=1", "https://api.mixpanel.com/track", "https://o123.ingest.sentry.io/api/1/envelope/",
+                   "https://static.hotjar.com/c/hotjar-1.js"] {
+            XCTAssertTrue(TrafficFilter.isAdOrTracker(URL(string: ad)!), ad)
+        }
+        for api in ["https://api.github.com/repos/a/b", "https://example.com/api/v2/items?page=2", "https://shop.example.com/graphql",
+                    "https://www.youtube.com/youtubei/v1/browse?key=x"] {
+            XCTAssertFalse(TrafficFilter.isAdOrTracker(URL(string: api)!), api)
+        }
+    }
+
+    func testCurlCommandIncludesMethodHeadersBodyAndCookies() {
+        var e = APIEndpoint(kind: .fetch, method: "POST", host: "api.site.test", path: "/v1/items", fullURL: "https://api.site.test/v1/items?a=1")
+        e.sample = APISample(pageURL: "https://site.test/app",
+                             requestHeaders: [HeaderPair(name: "Content-Type", value: "application/json"),
+                                              HeaderPair(name: "Authorization", value: "Bearer abc")],
+                             requestBody: #"{"name":"it's"}"#)
+        let curl = CurlBuilder.command(for: e, userAgent: "UA/1", cookie: "sid=1; theme=dark")
+        XCTAssertTrue(curl.hasPrefix("curl 'https://api.site.test/v1/items?a=1'"))
+        XCTAssertTrue(curl.contains("-X POST"))
+        XCTAssertTrue(curl.contains("-H 'Authorization: Bearer abc'"))
+        XCTAssertTrue(curl.contains("-H 'User-Agent: UA/1'"))
+        XCTAssertTrue(curl.contains("-H 'Referer: https://site.test/app'"))
+        XCTAssertTrue(curl.contains("-H 'Origin: https://site.test'"))
+        XCTAssertTrue(curl.contains("-b 'sid=1; theme=dark'"))
+        XCTAssertTrue(curl.contains(#"--data-raw '{"name":"it'\''s"}'"#), curl)   // single quote is escaped for the shell
+        XCTAssertTrue(curl.hasSuffix("--compressed"))
+    }
+
+    func testCurlForGetHasNoMethodOrBodyAndBinaryBodyIsNoted() {
+        var e = APIEndpoint(kind: .xhr, method: "GET", host: "a.test", path: "/x", fullURL: "https://a.test/x")
+        XCTAssertFalse(CurlBuilder.command(for: e, userAgent: nil, cookie: nil).contains("-X"))
+        e = APIEndpoint(kind: .xhr, method: "PUT", host: "a.test", path: "/x", fullURL: "https://a.test/x")
+        e.sample.requestBody = "[binary 120 bytes]"
+        let curl = CurlBuilder.command(for: e, userAgent: nil, cookie: nil)
+        XCTAssertFalse(curl.contains("--data-raw"))
+        XCTAssertTrue(curl.contains("binary"))
+    }
+}
