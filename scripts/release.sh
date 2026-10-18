@@ -13,7 +13,7 @@ REPO="ilham-fauzi/pathfinder"
 TAP_DIR="${TAP_DIR:-$(cd .. && pwd)/homebrew-tap}"
 VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Pathfinder/Resources/Info.plist)
 TAG="v$VERSION"
-ZIP="dist/pathfinder-$TAG.zip"
+ZIP="dist/Pathfinder-$VERSION.zip"   # must match the url in the Homebrew cask
 
 echo "===> Releasing Pathfinder $VERSION"
 
@@ -52,6 +52,8 @@ gh release create "$TAG" "$ZIP" "$ZIP.sig" dist/Pathfinder.pkg \
 
 echo "===> Updating Homebrew cask in $TAP_DIR..."
 CASK="$TAP_DIR/Casks/pathfinder.rb"
+git -C "$TAP_DIR" pull --ff-only
+[ -f "$CASK" ] || { echo "Error: $CASK not found" >&2; exit 1; }
 perl -pi -e 's/^(\s*version\s+)"[^"]*"/$1"'"$VERSION"'"/; s/^(\s*sha256\s+)"[^"]*"/$1"'"$SHA"'"/' "$CASK"
 git -C "$TAP_DIR" add Casks/pathfinder.rb
 git -C "$TAP_DIR" commit -m "Update pathfinder to $TAG"
