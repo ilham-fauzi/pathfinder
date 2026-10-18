@@ -120,7 +120,7 @@ struct GeneralSettingsTab: View {
             Toggle("Show Menu Bar Icon", isOn: $s.showMenuBarExtra)
             Toggle("Experimental: Browser tab", isOn: $s.showBrowserTab)
             Toggle("Player: hide the playlist while a video plays", isOn: $s.playerAutoHidePlaylist)
-                .help("The playlist slides over the picture when the pointer touches the right edge or you press L.")
+                .help("The playlist slides over the picture when you press the playlist button or L.")
             Picker("Browser search engine", selection: $s.browserSearchEngine) {
                 ForEach(SearchEngine.allCases) { Text($0.name).tag($0.rawValue) }
             }
@@ -274,11 +274,13 @@ struct AboutSettingsTab: View {
                 .foregroundColor(.accentColor)
             Text("Pathfinder").font(.title).bold()
             Text("Version \(Self.versionString)").foregroundColor(.secondary)
+
+            UpdateSection()
             
             HStack {
-                Link("GitHub", destination: URL(string: "https://github.com")!)
+                Link("GitHub", destination: URL(string: "https://github.com/ilham-fauzi/pathfinder")!)
                 Text("•")
-                Link("Report Issue", destination: URL(string: "https://github.com/issues")!)
+                Link("Report Issue", destination: URL(string: "https://github.com/ilham-fauzi/pathfinder/issues")!)
             }
             
             Text("License: GPL-3.0")

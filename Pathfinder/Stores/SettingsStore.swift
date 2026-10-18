@@ -97,6 +97,17 @@ class SettingsStore {
         }
     }
     
+    /// Look for a new Pathfinder release in the background (at most once a day).
+    var autoCheckUpdates: Bool {
+        get {
+            access(keyPath: \.autoCheckUpdates)
+            return UserDefaults.standard.object(forKey: "autoCheckUpdates") as? Bool ?? true
+        }
+        set {
+            withMutation(keyPath: \.autoCheckUpdates) { UserDefaults.standard.set(newValue, forKey: "autoCheckUpdates") }
+        }
+    }
+
     var appMode: AppMode {
         get {
             access(keyPath: \.appMode)

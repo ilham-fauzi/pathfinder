@@ -58,6 +58,10 @@ struct PlayerTabView: View {
             peekCloseTask?.cancel()
             model.playlistPeek = false
         }
+        // Opened by the button or L the pointer is elsewhere, so the 2 s countdown starts now; reaching the list cancels it.
+        .onChange(of: model.playlistPeek) { _, open in
+            if open { peekHovered(false) } else { peekCloseTask?.cancel() }
+        }
         .task {
             // Coming back to the tab with a video loaded: fit again once the layout is known.
             try? await Task.sleep(for: .milliseconds(200))
@@ -69,22 +73,18 @@ struct PlayerTabView: View {
         }
     }
 
-    /// While a video plays the playlist floats over the picture: touching the right edge opens it, and it
-    /// closes 2 s after the pointer leaves it (or at once when the picture is clicked).
+    /// While a video plays the playlist floats over the picture. It opens only from the playlist button (or L),
+    /// never from the pointer passing the edge, and closes 2 s after the pointer leaves it (or at once when the
+    /// picture is clicked).
     @ViewBuilder private var floatingPlaylist: some View {
-        if model.floatsPlaylist, !model.isFullScreen {
-            if model.playlistPeek {
-                HStack(spacing: 0) {
-                    Divider()
-                    PlaylistSidebar(model: model).frame(width: Self.sidebarWidth)
-                }
-                .shadow(color: .black.opacity(0.35), radius: 10, x: -3)
-                .transition(.move(edge: .trailing))
-                .onHover { inside in peekHovered(inside) }
-            } else {
-                Color.clear.frame(width: 14).contentShape(Rectangle())
-                    .onHover { inside in if inside { peekCloseTask?.cancel(); model.playlistPeek = true } }
+        if model.floatsPlaylist, !model.isFullScreen, model.playlistPeek {
+            HStack(spacing: 0) {
+                Divider()
+                PlaylistSidebar(model: model).frame(width: Self.sidebarWidth)
             }
+            .shadow(color: .black.opacity(0.35), radius: 10, x: -3)
+            .transition(.move(edge: .trailing))
+            .onHover { inside in peekHovered(inside) }
         }
     }
 

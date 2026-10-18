@@ -201,12 +201,28 @@ final class BrowserModel: NSObject {
             switch self {
             case .expanded: return "Expanded"
             case .collapsed: return "Collapsed"
-            case .auto: return "Auto (hidden, button shows it)"
+            case .auto: return "Auto (hover the left edge)"
             }
         }
     }
     var sideTabsMode = SideTabsMode(rawValue: UserDefaults.standard.string(forKey: "browserSideTabsMode") ?? "") ?? .expanded {
         didSet { UserDefaults.standard.set(sideTabsMode.rawValue, forKey: "browserSideTabsMode") }
+    }
+    /// What a site's fullscreen button does: fill the whole screen, or only the page area of this tab.
+    enum FullscreenMode: String, CaseIterable, Identifiable {
+        case screen, tab
+        var id: String { rawValue }
+        var name: String { self == .screen ? "Fill the screen" : "Fill this tab only" }
+    }
+    var fullscreenMode = FullscreenMode(rawValue: UserDefaults.standard.string(forKey: "browserFullscreenMode") ?? "") ?? .screen {
+        didSet {
+            guard fullscreenMode != oldValue else { return }
+            UserDefaults.standard.set(fullscreenMode.rawValue, forKey: "browserFullscreenMode")
+            // Open pages switch at once; the script is rebuilt so pages opened later start in the new mode.
+            let message = "window.postMessage({__pfFSMode:'\(fullscreenMode.rawValue)'},'*')"
+            for tab in tabs { tab.webView.evaluateJavaScript(message, completionHandler: nil) }
+            Task { await applyAdBlock() }
+        }
     }
     private(set) var bookmarks: [Bookmark] = {
         (UserDefaults.standard.data(forKey: "browserBookmarks")).flatMap { try? JSONDecoder().decode([Bookmark].self, from: $0) } ?? []
@@ -714,6 +730,12 @@ final class BrowserModel: NSObject {
         // Always inject media stream tracer across all frames
         controller.addUserScript(WKUserScript(
             source: Self.mediaSnifferScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        ))
+
+        controller.addUserScript(WKUserScript(
+            source: TabFullscreen.script(mode: fullscreenMode),
             injectionTime: .atDocumentStart,
             forMainFrameOnly: false
         ))
@@ -1288,5 +1310,118 @@ extension BrowserModel: WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
         } else if let item = entry.item {
             queue?.finishExternal(item.id, path: nil, error: cancelled ? "Cancelled" : error.localizedDescription)
         }
+    }
+}
+
+/// "Fill this tab only": the page's own fullscreen request is answered by stretching the element over the page
+/// area (the window, the tab bar and the address bar stay), instead of taking over the screen. It works in the
+/// page by replacing the Fullscreen API calls; in "Fill the screen" mode the original calls run untouched.
+/// A player inside an iframe asks its parent frame to stretch the iframe too.
+enum TabFullscreen {
+    static func script(mode: BrowserModel.FullscreenMode) -> String {
+        """
+        (function () {
+          if (window.__pfFS) { window.__pfFS.mode = '\(mode.rawValue)'; return; }
+          var st = window.__pfFS = { mode: '\(mode.rawValue)', el: null, saved: null };
+          var isTop = window.top === window;
+          var FILL = 'position:fixed!important;top:0!important;left:0!important;right:0!important;bottom:0!important;' +
+            'width:100vw!important;height:100vh!important;max-width:none!important;max-height:none!important;' +
+            'margin:0!important;padding:0!important;z-index:2147483647!important;background:#000!important;' +
+            'transform:none!important;border:0!important;';
+          var FREE = 'transform:none!important;filter:none!important;perspective:none!important;contain:none!important;' +
+            'overflow:visible!important;';
+          var orig = {};
+          function tab() { return st.mode === 'tab'; }
+          function fire(el) {
+            ['fullscreenchange', 'webkitfullscreenchange'].forEach(function (n) {
+              // Bubbles up to the document, so listeners there hear it once.
+              (el && el.isConnected ? el : document).dispatchEvent(new Event(n, { bubbles: true }));
+            });
+          }
+          function restore() {
+            if (!st.saved) return;
+            var el = st.el, list = st.saved;
+            st.saved = null; st.el = null;
+            list.reverse().forEach(function (p) {
+              if (p[1] === null) p[0].removeAttribute('style'); else p[0].setAttribute('style', p[1]);
+            });
+            fire(el);
+          }
+          function stretch(el) {
+            if (st.el === el) return;
+            restore();
+            var saved = [];
+            function set(n, css) { saved.push([n, n.getAttribute('style')]); n.style.cssText += ';' + css; }
+            for (var a = el.parentElement; a; a = a.parentElement) set(a, FREE);
+            set(el, FILL);
+            if (document.body) set(document.body, 'overflow:hidden!important;');
+            st.saved = saved; st.el = el;
+            fire(el);
+          }
+          function frameOf(win) {
+            var f = document.querySelectorAll('iframe,frame');
+            for (var i = 0; i < f.length; i++) if (f[i].contentWindow === win) return f[i];
+            return null;
+          }
+          function request(el) {
+            stretch(el);
+            if (!isTop) window.parent.postMessage({ __pfFS: 'enter' }, '*');
+            return Promise.resolve();
+          }
+          function exit() {
+            restore();
+            if (!isTop) window.parent.postMessage({ __pfFS: 'exit' }, '*');
+            return Promise.resolve();
+          }
+          function wrapMethod(proto, name, fn) {
+            var o = proto[name];
+            if (!o) return;
+            orig[name] = o;
+            proto[name] = function () { return tab() ? fn.apply(this, arguments) : o.apply(this, arguments); };
+          }
+          function wrapGetter(proto, name, fn) {
+            var d = Object.getOwnPropertyDescriptor(proto, name);
+            if (!d || !d.get) return;
+            Object.defineProperty(proto, name, { configurable: true, enumerable: d.enumerable,
+              get: function () { return tab() ? fn.call(this) : d.get.call(this); } });
+          }
+          ['requestFullscreen', 'webkitRequestFullscreen', 'webkitRequestFullScreen'].forEach(function (n) {
+            wrapMethod(Element.prototype, n, function () { return request(this); });
+          });
+          ['webkitEnterFullscreen', 'webkitEnterFullScreen'].forEach(function (n) {
+            if (window.HTMLVideoElement) wrapMethod(HTMLVideoElement.prototype, n, function () { request(this); });
+          });
+          ['exitFullscreen', 'webkitExitFullscreen', 'webkitCancelFullScreen'].forEach(function (n) {
+            wrapMethod(Document.prototype, n, exit);
+          });
+          ['fullscreenElement', 'webkitFullscreenElement', 'webkitCurrentFullScreenElement'].forEach(function (n) {
+            wrapGetter(Document.prototype, n, function () { return st.el; });
+          });
+          ['fullscreen', 'webkitIsFullScreen'].forEach(function (n) {
+            wrapGetter(Document.prototype, n, function () { return !!st.el; });
+          });
+          ['fullscreenEnabled', 'webkitFullscreenEnabled'].forEach(function (n) {
+            wrapGetter(Document.prototype, n, function () { return true; });
+          });
+          window.addEventListener('message', function (e) {
+            var d = e.data;
+            if (!d || typeof d !== 'object') return;
+            if (d.__pfFSMode) {
+              st.mode = d.__pfFSMode;
+              if (!tab()) exit();
+              var f = document.querySelectorAll('iframe,frame');
+              for (var i = 0; i < f.length; i++) try { f[i].contentWindow.postMessage(d, '*'); } catch (x) {}
+            } else if (d.__pfFS === 'enter' && tab()) {
+              var host = frameOf(e.source);
+              if (host) { stretch(host); if (!isTop) window.parent.postMessage({ __pfFS: 'enter' }, '*'); }
+            } else if (d.__pfFS === 'exit' && tab()) {
+              exit();
+            }
+          });
+          window.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && st.el && tab()) exit();
+          }, true);
+        })();
+        """
     }
 }

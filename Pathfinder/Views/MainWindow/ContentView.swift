@@ -7,6 +7,7 @@ struct ContentView: View {
     @Environment(SettingsStore.self) private var settingsStore
     @Environment(LogStore.self) private var logStore
     @Environment(PresetManager.self) private var presetManager
+    @Environment(AppUpdater.self) private var updater
     @State private var showVPN = false
     
     var body: some View {
@@ -39,6 +40,11 @@ struct ContentView: View {
                 .padding(.horizontal, 16).padding(.vertical, 6)
                 .background(Theme.surface)
                 .overlay(alignment: .bottom) { Divider() }
+            }
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if appState.section != .settings, let release = updater.availableRelease {
+                UpdateBanner(release: release)
             }
         }
         .toolbar {

@@ -105,6 +105,12 @@ brew install --cask ilham-fauzi/tap/pathfinder
 
 The app is ad hoc signed and not notarized, so macOS may block the first launch. If so, run `xattr -dr com.apple.quarantine /Applications/Pathfinder.app` or right-click the app and choose **Open**.
 
+### Updates
+
+Pathfinder checks GitHub for a new release when it starts (at most once a day) and shows a banner plus a notification. Open **Settings › About** and choose **Update and Restart**: the app downloads the release, verifies its Ed25519 signature, replaces itself and relaunches. **Pathfinder › Check for Updates…** checks on demand, and the daily check can be turned off in the same place.
+
+Maintainers publish a release with `scripts/release.sh --publish`. It builds the app, signs the update archive with the private key in `~/.config/pathfinder/update-signing.key` (create it once with `swift scripts/update-key.swift keygen`; the matching public key is `UpdateLogic.publicKey`), tags the release, uploads the archive and signature, and bumps the Homebrew cask.
+
 ### Run from source
 
 ```bash

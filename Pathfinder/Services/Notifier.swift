@@ -7,7 +7,7 @@ enum Notifier {
 
     /// Notification kinds; each has its own action buttons.
     enum Category: String, CaseIterable {
-        case linkCopied, completed, failed, trayHint
+        case linkCopied, completed, failed, trayHint, updateAvailable
     }
 
     enum Action {

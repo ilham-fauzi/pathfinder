@@ -41,6 +41,7 @@ struct PathfinderApp: App {
     @State private var browser: BrowserModel
     @State private var tray: TrayController
     @State private var player: PlayerModel
+    @State private var updater = AppUpdater()
 
     // MARK: - Init
 
@@ -102,10 +103,14 @@ struct PathfinderApp: App {
                 .environment(tunnel)
                 .environment(browser)
                 .environment(player)
+                .environment(updater)
                 .preferredColorScheme(settingsStore.appearance.colorScheme)
                 .frame(minWidth: windowMinimum.width, minHeight: windowMinimum.height)
                 .background(WindowSizer(minimum: windowMinimum))
                 .modifier(RegistersWindowOpener())
+                .task {
+                    await updater.checkIfDue(enabled: settingsStore.autoCheckUpdates, notify: settingsStore.showNotifications)
+                }
                 .onAppear {
                     appState.outputDirectory = settingsStore.defaultOutputDir
                     appState.mode = settingsStore.appMode
@@ -123,6 +128,13 @@ struct PathfinderApp: App {
 
         .commands {
             PlayerCommands(model: player)
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    NSApp.activate(ignoringOtherApps: true)
+                    SettingsTab.open(.about)
+                    Task { await updater.check() }
+                }
+            }
             CommandGroup(replacing: .appSettings) {
                 Button("Settings…") {
                     NSApp.activate(ignoringOtherApps: true)

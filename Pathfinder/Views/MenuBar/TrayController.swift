@@ -496,6 +496,9 @@ final class TrayController: NSObject {
             if let id = info["id"].flatMap(UUID.init(uuidString:)) { queue.retry(id) }
         case (.linkCopied, Notifier.Action.open), (.failed, Notifier.Action.open):
             showPopover()
+        case (.updateAvailable, _):
+            NSApp.activate(ignoringOtherApps: true)
+            SettingsTab.open(.about)
         default:
             break
         }

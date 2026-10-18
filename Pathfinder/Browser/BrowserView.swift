@@ -7,6 +7,25 @@ private struct WebViewContainer: NSViewRepresentable {
     func updateNSView(_ nsView: WKWebView, context: Context) {}
 }
 
+/// A strip that reports the pointer entering it through an NSTrackingArea. It never takes clicks.
+private struct EdgeHoverView: NSViewRepresentable {
+    let onEnter: () -> Void
+    func makeNSView(context: Context) -> NSView { let v = TrackingView(); v.onEnter = onEnter; return v }
+    func updateNSView(_ nsView: NSView, context: Context) { (nsView as? TrackingView)?.onEnter = onEnter }
+
+    final class TrackingView: NSView {
+        var onEnter: (() -> Void)?
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                                           owner: self, userInfo: nil))
+        }
+        override func mouseEntered(with event: NSEvent) { onEnter?() }
+    }
+}
+
 /// Experimental browser tab. Video pages go to the downloader; plain files download right here.
 struct BrowserView: View {
     @Environment(BrowserModel.self) private var browser
@@ -23,13 +42,15 @@ struct BrowserView: View {
     @State private var sideHover = false
     @State private var sideCollapseTask: Task<Void, Never>?
     @State private var clickMonitor: Any?
+    @State private var menuOpen = false
 
     var body: some View {
         HStack(spacing: 0) {
         if browser.verticalTabs {
             if browser.sideTabsMode == .auto {
-                // Nothing is kept in the layout: the panel floats over the page while it is shown, and a button
-                // at the left of the address bar brings it back.
+                // Nothing is kept in the layout: the panel floats over the page while it is shown. Touching the
+                // left edge (or the button at the left of the address bar) brings it, and it hides 1 s after the
+                // pointer is away from it.
                 Color.clear.frame(width: 0)
                     .overlay(alignment: .leading) {
                         if sideHover {
@@ -56,6 +77,14 @@ struct BrowserView: View {
             ZStack {
                 WebViewContainer(webView: browser.webView)
                     .id(browser.selectedTab.id)
+                if browser.verticalTabs, browser.sideTabsMode == .auto, !sideHover {
+                    // A SwiftUI hover view would sit under the web view's AppKit hit-testing; a tracking area
+                    // does not care what is drawn above it.
+                    HStack(spacing: 0) {
+                        EdgeHoverView { showSidePanelFromEdge() }.frame(width: 10)
+                        Spacer(minLength: 0)
+                    }
+                }
                 if browser.currentURL == nil && !browser.isLoading && browser.loadError == nil {
                     VStack(spacing: 10) {
                         Image(systemName: "globe").font(.system(size: 40)).foregroundStyle(Theme.text3)
@@ -101,6 +130,8 @@ struct BrowserView: View {
             if browser.currentURL == nil { addressFocused = true }
         }
         .onDisappear { stopWatchingPageClicks() }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in menuTracking(true) }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in menuTracking(false) }
         .onChange(of: browser.currentURL) { _, _ in if !addressFocused { syncAddress() } }
         .onChange(of: browser.selectedTabID) { _, _ in
             syncAddress()
@@ -255,18 +286,18 @@ struct BrowserView: View {
         .background(Theme.surface2)
     }
 
-    /// The corner button: show the panel (it hides itself 3 s after the pointer is away from it), or hide it now.
+    /// The corner button: show the panel (it hides itself 1 s after the pointer is away from it), or hide it now.
     private func toggleSidePanel() {
         sideCollapseTask?.cancel()
         if sideHover {
             withAnimation(.easeOut(duration: 0.15)) { sideHover = false }
         } else {
             withAnimation(.easeOut(duration: 0.15)) { sideHover = true }
-            sideHovered(false)   // starts the 3 s countdown; entering the panel cancels it
+            sideHovered(false)   // starts the 1 s countdown; entering the panel cancels it
         }
     }
 
-    /// A click on the web page hides an open auto panel straight away, without waiting for the 2 s.
+    /// A click on the web page hides an open auto panel straight away, without waiting for the 1 s.
     private func watchPageClicks() {
         guard clickMonitor == nil else { return }
         clickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
@@ -289,18 +320,38 @@ struct BrowserView: View {
         clickMonitor = nil
     }
 
-    /// Opens at once; closes only after the pointer has been away for 3 s (coming back cancels it).
+    /// The pointer touched the left edge: show the panel under it. The panel's own onHover may not fire until the
+    /// pointer moves, so the 1 s countdown is armed right away (entering the panel cancels it).
+    private func showSidePanelFromEdge() {
+        guard !sideHover else { return }
+        withAnimation(.easeOut(duration: 0.12)) { sideHover = true }
+        sideHovered(false)
+    }
+
+    /// Opens at once; closes only after the pointer has been away for 1 s (coming back cancels it).
     private func sideHovered(_ inside: Bool) {
         sideCollapseTask?.cancel()
         if inside {
             withAnimation(.easeOut(duration: 0.12)) { sideHover = true }
         } else {
             sideCollapseTask = Task {
-                try? await Task.sleep(for: .seconds(3))
+                try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled else { return }
+                // A menu opened from the panel (its popup lies outside it) keeps the panel until it closes.
+                guard !menuOpen else { return }
                 withAnimation(.easeOut(duration: 0.15)) { sideHover = false }
             }
         }
+    }
+
+    private func menuTracking(_ open: Bool) {
+        menuOpen = open
+        guard !open, sideHover else { return }
+        // The menu is gone: stay if the pointer is back over the panel, else start the countdown.
+        let web = browser.webView
+        guard let window = web.window else { return }
+        let point = web.convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        sideHovered(point.x >= 0 && point.x <= 210)
     }
 
     @ViewBuilder
@@ -407,6 +458,20 @@ struct BrowserView: View {
             .padding(.horizontal, 12).frame(minWidth: 140, minHeight: 36, maxHeight: 36)
             .background(Theme.surface, in: RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(addressFocused ? Theme.accent : Theme.border, lineWidth: 1.5))
+
+            Menu {
+                Picker("Video fullscreen", selection: Binding(get: { browser.fullscreenMode },
+                                                              set: { browser.fullscreenMode = $0 })) {
+                    ForEach(BrowserModel.FullscreenMode.allCases) { Text($0.name).tag($0) }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                Image(systemName: browser.fullscreenMode == .tab ? "rectangle.inset.filled" : "arrow.up.left.and.arrow.down.right")
+                    .foregroundStyle(Theme.text3)
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .help("Video fullscreen: \(browser.fullscreenMode.name). Click to change.")
+            .accessibilityLabel("Video fullscreen mode")
 
             Button { browser.toggleBookmark() } label: {
                 Image(systemName: browser.isBookmarked ? "star.fill" : "star")
