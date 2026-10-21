@@ -32,7 +32,8 @@ struct PlayerTabView: View {
         .overlay(alignment: .trailing) { floatingPlaylist }
         .animation(.easeOut(duration: 0.2), value: model.playlistPeek)
         .clipped()
-        .background(Theme.bg)
+        .background(cinema ? Color.black : Theme.bg)
+        .ignoresSafeArea(.container, edges: model.isFullScreen ? .top : [])
         .overlay {
             if dropTargeted {
                 RoundedRectangle(cornerRadius: 12).stroke(Theme.accent, style: StrokeStyle(lineWidth: 2, dash: [8, 5]))
@@ -45,8 +46,18 @@ struct PlayerTabView: View {
             model.addURLs(files, playNow: model.currentPath == nil)
             return true
         } isTargeted: { dropTargeted = $0 }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willEnterFullScreenNotification)) { note in
+            // The toolbar's band would otherwise stay above the picture, empty.
+            (note.object as? NSWindow)?.toolbar?.isVisible = false
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { _ in model.isFullScreen = true }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { _ in model.isFullScreen = false }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { note in
+            model.isFullScreen = false
+            if let window = note.object as? NSWindow {
+                window.toolbar?.isVisible = true
+                WindowSizer.setNativeFullScreen(false, for: window)
+            }
+        }
         .onChange(of: model.videoAspect) { _, aspect in if let aspect { fitWindow(toAspect: aspect) } }
         .onChange(of: model.showPlaylist) { _, shown in resizeForPlaylist(shown: shown) }
         // The docked list leaves when a video starts (the window gives back its width) and returns for a problem file.
@@ -138,9 +149,12 @@ struct PlayerTabView: View {
         window.setFrame(frame, display: true, animate: true)
     }
 
+    /// While a picture is showing, the bars around it are black (also when the window fills the desktop).
+    private var cinema: Bool { model.isFullScreen || (model.status == .ready && model.hasVideo) }
+
     private var stage: some View {
         ZStack {
-            Theme.bg
+                        cinema ? Color.black : Theme.bg
             stageContent
         }
         .focusable()
@@ -461,6 +475,7 @@ private struct VideoSurface: NSViewRepresentable {
 
     func updateNSView(_ view: PlayerLayerView, context: Context) {
         if view.playerLayer.player !== player { view.playerLayer.player = player }
+        view.needsLayout = true
     }
 }
 
@@ -481,6 +496,14 @@ private final class PlayerLayerView: NSView {
     override func layout() {
         super.layout()
         playerLayer.frame = bounds
+        // The picture fills the area when that trims only a sliver off its edges, so there are no bars; a
+        // larger mismatch (a tall window, a portrait video) keeps the whole picture with bars.
+        let size = playerLayer.player?.currentItem?.presentationSize ?? .zero
+        if size.width > 0, size.height > 0, bounds.width > 0, bounds.height > 0 {
+            let fit = min(bounds.width / size.width, bounds.height / size.height)
+            let fill = max(bounds.width / size.width, bounds.height / size.height)
+            playerLayer.videoGravity = fill / fit <= 1.12 ? .resizeAspectFill : .resizeAspect
+        }
     }
 
     override var acceptsFirstResponder: Bool { false }

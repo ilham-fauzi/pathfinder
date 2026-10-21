@@ -315,6 +315,7 @@ final class PlayerModel {
 
     /// The user left the Player tab: stop the sound but keep the place.
     func leaveTab() {
+        exitFullScreen()
         releaseKeys()
         if isPlaying { pause() }
     }
@@ -670,8 +671,16 @@ final class PlayerModel {
         UserDefaults.standard.set(showPlaylist, forKey: "playerShowPlaylist")
     }
 
+    /// Real full screen: the whole display, with no title bar or toolbar band above the picture.
     func toggleFullScreen() {
-        (NSApp.keyWindow ?? NSApp.mainWindow)?.toggleFullScreen(nil)
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+        if !window.styleMask.contains(.fullScreen) { WindowSizer.setNativeFullScreen(true, for: window) }
+        window.toggleFullScreen(nil)
+    }
+
+    func exitFullScreen() {
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow, window.styleMask.contains(.fullScreen) else { return }
+        window.toggleFullScreen(nil)
     }
 
     func openExternally() {

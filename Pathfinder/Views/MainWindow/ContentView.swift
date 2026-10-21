@@ -8,6 +8,7 @@ struct ContentView: View {
     @Environment(LogStore.self) private var logStore
     @Environment(PresetManager.self) private var presetManager
     @Environment(AppUpdater.self) private var updater
+    @Environment(PlayerModel.self) private var player
     @State private var showVPN = false
     
     var body: some View {
@@ -47,6 +48,8 @@ struct ContentView: View {
                 UpdateBanner(release: release)
             }
         }
+        // Full-screen video has nothing above it: no tab bar, no empty toolbar band.
+        .toolbar(appState.section == .player && player.isFullScreen ? .hidden : .automatic, for: .windowToolbar)
         .toolbar {
             // One group of tabs in the middle, one small status button on the right.
             ToolbarItem(placement: .principal) {

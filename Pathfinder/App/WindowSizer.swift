@@ -55,6 +55,19 @@ struct WindowSizer: NSViewRepresentable {
         }
     }
 
+    /// Native full screen is off for the window (the green button fills the desktop instead); the Player's
+    /// full-screen button allows it for as long as the video is full screen.
+    @MainActor
+    static func setNativeFullScreen(_ allowed: Bool, for window: NSWindow) {
+        if allowed {
+            window.collectionBehavior.remove(.fullScreenNone)
+            window.collectionBehavior.insert(.fullScreenPrimary)
+        } else {
+            window.collectionBehavior.remove(.fullScreenPrimary)
+            window.collectionBehavior.insert(.fullScreenNone)
+        }
+    }
+
     @MainActor private static var savedFrames: [ObjectIdentifier: NSRect] = [:]
 
     private final class SizerView: NSView {
@@ -100,8 +113,9 @@ struct WindowSizer: NSViewRepresentable {
             let visible = (window.screen ?? NSScreen.main)?.visibleFrame.size ?? NSSize(width: 3000, height: 2000)
             window.contentMinSize = minimum
             window.maxSize = NSSize(width: max(visible.width, minimum.width), height: max(visible.height, minimum.height))
-            window.collectionBehavior.remove(.fullScreenPrimary)
-            window.collectionBehavior.insert(.fullScreenNone)
+            // The Player turns native full screen on for itself while it is playing full screen; leave that alone.
+            guard !window.styleMask.contains(.fullScreen) else { return }
+            WindowSizer.setNativeFullScreen(false, for: window)
             if grow {
                 let content = window.contentRect(forFrameRect: window.frame).size
                 let target = NSSize(width: max(content.width, minimum.width), height: max(content.height, minimum.height))
