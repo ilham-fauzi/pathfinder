@@ -37,7 +37,7 @@ final class FileIntegrityMonitor {
     @ObservationIgnored var watchedFolders: () -> [String] = { [] }
     @ObservationIgnored private var loop: Task<Void, Never>?
     /// When monitoring began: older files in a watched folder are not reported as new.
-    @ObservationIgnored private let watchSince: Date = {
+    @ObservationIgnored private var watchSince: Date = {
         let key = "integrityWatchSince"
         if let saved = UserDefaults.standard.object(forKey: key) as? Date { return saved }
         let now = Date()
@@ -117,6 +117,19 @@ final class FileIntegrityMonitor {
     func remove(_ path: String) {
         entries.removeAll { $0.path == path }
         states[path] = nil
+        save()
+    }
+
+    /// Stop watching every saved file and forget the "new file" alerts. The app's own tools stay under watch.
+    /// Monitoring restarts from now, so files already in the watched folders are not reported as new afterwards.
+    func clear() {
+        let kept = entries.filter { $0.source == .tool }
+        let keptPaths = Set(kept.map(\.path))
+        entries = kept
+        states = states.filter { keptPaths.contains($0.key) }
+        unexpected = []
+        watchSince = Date()
+        UserDefaults.standard.set(watchSince, forKey: "integrityWatchSince")
         save()
     }
 

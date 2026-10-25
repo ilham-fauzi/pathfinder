@@ -543,6 +543,7 @@ private struct FirewallView: View {
 private struct IntegrityView: View {
     @Environment(BrowserModel.self) private var browser
     @State private var showAll = false
+    @State private var confirmClear = false
 
     var body: some View {
         let fim = browser.security.integrity
@@ -559,8 +560,16 @@ private struct IntegrityView: View {
                     if fim.busy { ProgressView().controlSize(.small) } else { Image(systemName: "arrow.clockwise") }
                 }
                 .help("Check every file now (re-reads each one)")
+                Button { confirmClear = true } label: { Image(systemName: "trash") }
+                    .disabled(fim.entries.allSatisfy { $0.source == .tool } && fim.unexpected.isEmpty)
+                    .help("Clear the list of watched files")
             }
             .buttonStyle(IconButtonStyle())
+            .confirmationDialog("Clear the list of watched files?", isPresented: $confirmClear) {
+                Button("Clear list", role: .destructive) { fim.clear() }
+            } message: {
+                Text("The files themselves are not touched. The app's own tools stay under watch.")
+            }
             .padding(10)
             Divider()
             ScrollView {
