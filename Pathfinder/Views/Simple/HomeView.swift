@@ -13,6 +13,9 @@ struct ErrorPresentation {
         } else if message.hasPrefix("This link doesn’t lead to a video") {
             title = "This link doesn’t lead to a video"
             hint = "Open the video itself in your browser, copy the link from the address bar, and paste it here. Links to a homepage, search results or an article won’t work."
+        } else if message.hasPrefix("No video found at this page address") {
+            title = "No video found at this page address"
+            hint = "This site plays its video from a stream the page loads. Open it in the Browser tab, let the video play, then press Download there."
         } else if message.contains("404") || message.contains("Cloudflare") || message.contains("403") || message.contains("Blob") {
             title = message
             hint = "This site may have bot verification or a custom blob player. Open it in the in-app Browser tab to trace and download the stream."

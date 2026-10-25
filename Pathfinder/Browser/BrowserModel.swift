@@ -52,7 +52,8 @@ final class DetectedStream: Identifiable, Equatable {
     let url: String
     let pageURL: String
     let title: String
-    let type: StreamType
+    /// Set from the address when found; a `.other` stream gets its real type once probing shows what it is.
+    var type: StreamType
     /// The frame (often an embedded player iframe) that requested the stream.
     let frame: WKFrameInfo?
     /// When the page asked for it: pre-roll ads come before the video.
@@ -63,6 +64,16 @@ final class DetectedStream: Identifiable, Equatable {
         case dash = "DASH (.mpd)"
         case direct = "Video"
         case other = "Stream"
+
+        /// The answer of the page probe's `kind` mode ("hls", "dash" or "video").
+        init?(probedKind: String) {
+            switch probedKind {
+            case "hls": self = .hls
+            case "dash": self = .dash
+            case "video": self = .direct
+            default: return nil
+            }
+        }
     }
 
     init(url: String, pageURL: String, title: String, type: StreamType, frame: WKFrameInfo? = nil) {
@@ -127,8 +138,14 @@ final class MediaSnifferScriptHandler: NSObject, WKScriptMessageHandler {
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let dict = message.body as? [String: Any],
-              let url = dict["url"] as? String else { return }
+        guard let dict = message.body as? [String: Any] else { return }
+        if dict["hello"] != nil {
+            let frame = message.frameInfo
+            let webView = message.webView
+            MainActor.assumeIsolated { model?.registerFrame(frame, in: webView) }
+            return
+        }
+        guard let url = dict["url"] as? String else { return }
         let pageUrl = dict["pageUrl"] as? String ?? ""
         let title = dict["title"] as? String ?? ""
         let kind = dict["kind"] as? String ?? ""
@@ -169,6 +186,10 @@ final class BrowserTab: Identifiable {
     fileprivate var restoreURL: URL?
     /// Media streams (HLS .m3u8, DASH .mpd, or direct video) detected on this tab's page.
     fileprivate(set) var detectedStreams: [DetectedStream] = []
+    /// Every frame of the page that announced itself, so the Download button can look for streams in each one.
+    @ObservationIgnored var knownFrames: [WKFrameInfo] = []
+    /// Source of the video under the pointer at the last right-click, listed first in the page menu.
+    @ObservationIgnored var menuVideoSource: String?
     /// What the security tools found on this tab's page (API calls, threats, site protection).
     let security = TabSecurity()
     @ObservationIgnored fileprivate var observations: [NSKeyValueObservation] = []
@@ -278,6 +299,9 @@ final class BrowserModel: NSObject {
     /// Folder for direct file downloads (set by the app).
     @ObservationIgnored var downloadDirectory: () -> String = { NSHomeDirectory() + "/Downloads" }
     @ObservationIgnored private var snifferHandler: MediaSnifferScriptHandler?
+    @ObservationIgnored private var pageMenuHandler: PageMenuScriptHandler?
+    /// Queues a stream picked from the page's own right-click menu (set by the browser view).
+    @ObservationIgnored var onDownloadStream: ((DetectedStream) -> Void)?
     @ObservationIgnored private var securityHandler: SecurityScriptHandler?
     /// Page scanner, firewall and file-integrity monitor.
     let security = SecurityCenter()
@@ -419,11 +443,23 @@ final class BrowserModel: NSObject {
             if (el && (el.currentSrc || el.src)) report(el.currentSrc || el.src);
         }, true);
 
+        // A player that sets its source in a way none of the hooks see still plays it: take what is playing.
+        document.addEventListener('playing', function(e) {
+            var el = e.target;
+            var src = el && (el.currentSrc || el.src);
+            if (src && /^https?:/i.test(src)) report(src, 'media');
+        }, true);
+
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', scanElements);
         } else {
             scanElements();
         }
+
+        // Keep the page's list of loaded addresses long enough to find the playlist in it later (default 250).
+        try { performance.setResourceTimingBufferSize(2000); } catch (e) {}
+        // Tell the app this frame exists, so the Download button can look inside it later.
+        try { window.webkit.messageHandlers.mediaSniffer.postMessage({ hello: true }); } catch (e) {}
     })();
     """
 
@@ -432,6 +468,9 @@ final class BrowserModel: NSObject {
         let handler = MediaSnifferScriptHandler(model: self)
         contentController.add(handler, name: "mediaSniffer")
         snifferHandler = handler
+        let menuHandler = PageMenuScriptHandler(model: self)
+        contentController.add(menuHandler, name: PageMenu.handlerName)
+        pageMenuHandler = menuHandler
         let guardHandler = SecurityScriptHandler(model: self)
         contentController.add(guardHandler, name: PageGuardScript.handlerName)
         securityHandler = guardHandler
@@ -464,14 +503,21 @@ final class BrowserModel: NSObject {
         config.userContentController = contentController
         // Lets video players go fullscreen (the HTML Fullscreen API is off by default in WKWebView).
         config.preferences.isElementFullscreenEnabled = true
-        let view = WKWebView(frame: .zero, configuration: config)
+        let view = PageWebView(frame: .zero, configuration: config)
         view.customUserAgent = Self.userAgent
-        // Right-click a page and choose Inspect Element to open Safari's Web Inspector.
+        // Right-click a page and choose Inspect Element to open Safari's Web Inspector
+        // (Option-right-click when the site replaces the menu).
         view.isInspectable = true
         view.allowsBackForwardNavigationGestures = true
         view.navigationDelegate = self
         view.uiDelegate = self
         let tab = BrowserTab(webView: view)
+        view.extraMenuItems = { [weak self, weak tab] in
+            guard let self, let tab else { return [] }
+            return PageMenu.items(streams: tab.detectedStreams, underCursor: tab.menuVideoSource,
+                                  download: { [weak self] in self?.onDownloadStream?($0) },
+                                  copy: { PageMenu.copy($0.url) })
+        }
         tab.observations = [
             view.observe(\.url) { [weak self, weak tab] _, _ in Task { @MainActor in if let tab { self?.sync(tab) } } },
             view.observe(\.title) { [weak self, weak tab] _, _ in Task { @MainActor in if let tab { self?.sync(tab) } } },
@@ -735,6 +781,12 @@ final class BrowserModel: NSObject {
         ))
 
         controller.addUserScript(WKUserScript(
+            source: PageMenu.script,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        ))
+
+        controller.addUserScript(WKUserScript(
             source: TabFullscreen.script(mode: fullscreenMode),
             injectionTime: .atDocumentStart,
             forMainFrameOnly: false
@@ -845,6 +897,38 @@ final class BrowserModel: NSObject {
 
     /// Enough for any real page; stops a page that fetches endless unique media URLs from growing the list.
     private static let maxDetectedStreams = 60
+
+    /// Remember a frame of the page (it announced itself), up to a few dozen per page.
+    func registerFrame(_ frame: WKFrameInfo, in webView: WKWebView?) {
+        guard !frame.isMainFrame, let tab = tab(for: webView ?? frame.webView), tab.knownFrames.count < 40 else { return }
+        tab.knownFrames.append(frame)
+    }
+
+    func noteMenuVideo(_ source: String?, in webView: WKWebView?) {
+        guard let tab = tab(for: webView) else { return }
+        tab.menuVideoSource = source?.isEmpty == false ? source : nil
+    }
+
+    /// Open Safari's Web Inspector for the shown tab. WebKit has no public call for it, so this uses the
+    /// private inspector object when it is there and otherwise says how to reach Inspect Element.
+    @discardableResult
+    func showWebInspector() -> Bool {
+        guard let inspector = Self.inspector(of: webView) else {
+            statusMessage = "The Web Inspector can't be opened from here on this macOS version. "
+                + "Option-right-click the page and choose Inspect Element."
+            return false
+        }
+        inspector.perform(NSSelectorFromString("show"))
+        return true
+    }
+
+    static func inspector(of view: WKWebView) -> NSObject? {
+        let getter = NSSelectorFromString("_inspector")
+        guard view.responds(to: getter),
+              let inspector = view.perform(getter)?.takeUnretainedValue() as? NSObject,
+              inspector.responds(to: NSSelectorFromString("show")) else { return nil }
+        return inspector
+    }
 
     func clearDetectedStreams() {
         selectedTab.detectedStreams.removeAll()
@@ -1065,6 +1149,8 @@ extension BrowserModel: WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
         tab.loadError = nil
         tab.blockedURL = nil
         tab.detectedStreams.removeAll()
+        tab.knownFrames.removeAll()
+        tab.menuVideoSource = nil
         applyMute(in: tab)
     }
 
