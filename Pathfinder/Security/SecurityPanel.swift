@@ -544,6 +544,7 @@ private struct IntegrityView: View {
     @Environment(BrowserModel.self) private var browser
     @State private var showAll = false
     @State private var confirmClear = false
+    @State private var confirmTrustAll = false
 
     var body: some View {
         let fim = browser.security.integrity
@@ -555,6 +556,16 @@ private struct IntegrityView: View {
                 }
                 Spacer()
                 Toggle("Show all", isOn: $showAll).toggleStyle(.checkbox).font(.system(size: 12))
+                if fim.canTrustAll {
+                    Button { confirmTrustAll = true } label: {
+                        HStack(spacing: 4) {
+                            if fim.trusting { ProgressView().controlSize(.small) } else { Image(systemName: "checkmark.shield") }
+                            Text("Trust all").font(.system(size: 12, weight: .medium))
+                        }
+                    }
+                    .disabled(fim.trusting || fim.busy)
+                    .help("Trust every new and changed file as it is now")
+                }
                 Button { addFile(fim) } label: { Image(systemName: "plus") }.help("Watch another file")
                 Button { Task { await fim.verify(deep: true) } } label: {
                     if fim.busy { ProgressView().controlSize(.small) } else { Image(systemName: "arrow.clockwise") }
@@ -565,6 +576,12 @@ private struct IntegrityView: View {
                     .help("Clear the list of watched files")
             }
             .buttonStyle(IconButtonStyle())
+            .confirmationDialog(TrustAllPrompt.title(new: fim.trustAllCounts.new, changed: fim.trustAllCounts.changed),
+                                isPresented: $confirmTrustAll) {
+                Button("Trust all") { Task { await fim.trustAll() } }
+            } message: {
+                Text(TrustAllPrompt.message)
+            }
             .confirmationDialog("Clear the list of watched files?", isPresented: $confirmClear) {
                 Button("Clear list", role: .destructive) { fim.clear() }
             } message: {
@@ -615,6 +632,19 @@ private struct IntegrityView: View {
         guard panel.runModal() == .OK else { return }
         Task { for url in panel.urls { await fim.record(path: url.path, source: .manual) } }
     }
+}
+
+/// Wording of the "Trust all" confirmation.
+enum TrustAllPrompt {
+    static func title(new: Int, changed: Int) -> String {
+        var parts: [String] = []
+        if new > 0 { parts.append("\(new) new file\(new == 1 ? "" : "s")") }
+        if changed > 0 { parts.append("\(changed) changed file\(changed == 1 ? "" : "s")") }
+        return parts.isEmpty ? "Nothing to trust" : "Trust " + parts.joined(separator: " and ") + "?"
+    }
+
+    static let message = "Their contents as they are now become the reference, and later changes to them will be reported. "
+        + "Missing files are not affected."
 }
 
 private struct IntegrityRow: View {
