@@ -115,8 +115,14 @@ final class SecurityTests: XCTestCase {
 
     // MARK: File integrity
 
+    /// `TMPDIR` when set (a sandboxed run gives its own writable folder), else the user's temporary folder.
+    private static var temporaryDirectory: URL {
+        if let dir = ProcessInfo.processInfo.environment["TMPDIR"], !dir.isEmpty { return URL(fileURLWithPath: dir, isDirectory: true) }
+        return FileManager.default.temporaryDirectory
+    }
+
     func testFileIntegrityDetectsChangeAndDeletion() async throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pf-fim-\(UUID().uuidString)")
+        let dir = Self.temporaryDirectory.appendingPathComponent("pf-fim-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let file = dir.appendingPathComponent("report.pdf")
@@ -146,7 +152,7 @@ final class SecurityTests: XCTestCase {
     }
 
     func testProgramPretendingToBeADocumentIsNoted() throws {
-        let file = FileManager.default.temporaryDirectory.appendingPathComponent("pf-\(UUID().uuidString).jpg")
+        let file = Self.temporaryDirectory.appendingPathComponent("pf-\(UUID().uuidString).jpg")
         try Data([0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00]).write(to: file)
         defer { try? FileManager.default.removeItem(at: file) }
         XCTAssertNotNil(FileIntegrityMonitor.inspect(file.path))
@@ -155,7 +161,7 @@ final class SecurityTests: XCTestCase {
     }
 
     func testKnownSHA256() throws {
-        let file = FileManager.default.temporaryDirectory.appendingPathComponent("pf-\(UUID().uuidString).txt")
+        let file = Self.temporaryDirectory.appendingPathComponent("pf-\(UUID().uuidString).txt")
         try Data("abc".utf8).write(to: file)
         defer { try? FileManager.default.removeItem(at: file) }
         XCTAssertEqual(FileIntegrityMonitor.hash(of: file.path), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
