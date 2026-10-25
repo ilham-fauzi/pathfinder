@@ -2,6 +2,14 @@ import XCTest
 import WebKit
 @testable import Pathfinder
 
+/// Where tests may write: `TMPDIR` when set (a sandboxed run gives its own), else the user's temporary folder.
+func writableTemporaryDirectory() -> URL {
+    if let dir = ProcessInfo.processInfo.environment["TMPDIR"], !dir.isEmpty {
+        return URL(fileURLWithPath: dir, isDirectory: true)
+    }
+    return FileManager.default.temporaryDirectory
+}
+
 /// A small local site served by python3, for loading real pages into the browser.
 final class LocalSite {
     let root: URL
@@ -11,7 +19,7 @@ final class LocalSite {
     init(files: [String: String]) async throws {
         let python = URL(fileURLWithPath: "/usr/bin/python3")
         guard FileManager.default.isExecutableFile(atPath: python.path) else { throw XCTSkip("python3 not available") }
-        root = FileManager.default.temporaryDirectory.appendingPathComponent("pf-site-\(UUID().uuidString)", isDirectory: true)
+        root = writableTemporaryDirectory().appendingPathComponent("pf-site-\(UUID().uuidString)", isDirectory: true)
         for (path, body) in files {
             let url = root.appendingPathComponent(path)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -46,7 +54,7 @@ final class StreamDiscoveryTests: XCTestCase {
     private var logURL: URL!
 
     override func setUp() async throws {
-        logURL = FileManager.default.temporaryDirectory.appendingPathComponent("stream-check-\(UUID()).log")
+        logURL = writableTemporaryDirectory().appendingPathComponent("stream-check-\(UUID()).log")
         StreamCheckLog.fileURLOverride = logURL
     }
 
