@@ -128,6 +128,7 @@ struct PathfinderApp: App {
 
         .commands {
             PlayerCommands(model: player)
+            BrowserCommands(browser: browser)
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") {
                     NSApp.activate(ignoringOtherApps: true)

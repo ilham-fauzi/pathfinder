@@ -197,7 +197,19 @@ final class AppState {
         lastAnalyzedURL = nil
         pendingCookiesFile = cookiesFile
         pendingReferer = referer
-        await analyze(using: service, preferredTitle: title, referer: referer, cookiesFile: cookiesFile)
+        await analyze(using: service, preferredTitle: title, referer: referer, cookiesFile: cookiesFile, fromBrowser: true)
+    }
+
+    static let browserNoVideoMessage = "No video found at this page address. "
+        + "Go back to the Browser tab, let the video play, then press Download there."
+
+    /// A page sent from the in-app browser that yt-dlp can't read: point back to the browser's own Download,
+    /// not to copying the address (the person already has the page open).
+    static func fromBrowser(_ error: AppError) -> AppError {
+        if case .analysisError(let message) = error, message.hasPrefix("This link doesn’t lead to a video") {
+            return .analysisError(browserNoVideoMessage)
+        }
+        return error
     }
 
     @MainActor
@@ -211,7 +223,8 @@ final class AppState {
 
     /// Validate the current URL, then fetch its metadata with yt-dlp.
     @MainActor
-    func analyze(using service: YTDLPService, preferredTitle: String? = nil, referer: String? = nil, cookiesFile: URL? = nil) async {
+    func analyze(using service: YTDLPService, preferredTitle: String? = nil, referer: String? = nil, cookiesFile: URL? = nil,
+                 fromBrowser: Bool = false) async {
         if let source = ListingSource.detect(currentURL) {
             await openListing(source, input: currentURL.trimmingCharacters(in: .whitespacesAndNewlines), using: service)
             return
@@ -224,7 +237,7 @@ final class AppState {
             error = .analysisError("Blob URLs exist only in browser memory and cannot be downloaded directly. Open the webpage in the built-in Browser tab to detect the stream.")
             return
         case .invalid:
-            error = .analysisError("This link doesn't lead to a video.")
+            error = .analysisError("This link doesn’t lead to a video.")
             return
         case .ok:
             break
@@ -254,7 +267,7 @@ final class AppState {
             currentVideoInfo = info
             if usedReferer != downloadOptions.referer { pendingReferer = usedReferer }
         } catch let appError as AppError {
-            error = appError
+            error = fromBrowser ? Self.fromBrowser(appError) : appError
         } catch {
             self.error = .analysisError(error.localizedDescription)
         }

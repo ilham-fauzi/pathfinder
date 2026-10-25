@@ -127,10 +127,15 @@ struct BrowserView: View {
         .onAppear {
             syncAddress()
             watchPageClicks()
+            browser.onDownloadStream = { sendStream($0) }
             if browser.currentURL == nil { addressFocused = true }
         }
         .onDisappear { stopWatchingPageClicks() }
-        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in menuTracking(true) }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+            menuTracking(true)
+            // A menu listing the page's streams is open: look for ones the sniffer missed, so they appear in it.
+            Task { await browser.recoverStreams() }
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in menuTracking(false) }
         .onChange(of: browser.currentURL) { _, _ in if !addressFocused { syncAddress() } }
         .onChange(of: browser.selectedTabID) { _, _ in
@@ -647,29 +652,34 @@ struct BrowserView: View {
         return "Find and download the video on this page"
     }
 
-    /// The one-click choice: the page itself for known video sites, else the best detected stream, else the page.
+    /// The one-click choice: the page itself for known video sites, else the main stream found on the page.
+    /// When there is none yet the browser stays put and says so; the page address is only tried by hand.
     private func download() {
-        guard pageAction != .video, !browser.detectedStreams.isEmpty else { send(); return }
         guard !checkingStreams else { return }
         checkingStreams = true
         browser.statusMessage = "Checking which stream is the main video…"
         Task {
             defer { checkingStreams = false }
-            guard let choice = await browser.mainStream(among: browser.detectedStreams) else { send(); return }
-            // Only short clips so far: the page is most likely still showing its ads.
-            if let d = choice.duration, d < BrowserModel.minimumMainLength {
-                let what = d > 0 ? "a short clip (\(Self.clock(d)))" : "a small file"
+            switch await browser.chooseDownload(knownVideoPage: pageAction == .video) {
+            case .pageLink:
+                browser.statusMessage = nil
+                send()
+            case .noStreamYet:
+                browser.statusMessage = DownloadDecision.noStreamMessage
+            case .shortClip(let choice):
+                // Only short clips so far: the page is most likely still showing its ads.
+                let what = (choice.duration ?? 0) > 0 ? "a short clip (\(Self.clock(choice.duration ?? 0)))" : "a small file"
                 browser.statusMessage = "Only \(what) was found, probably an ad. Let the main video "
                     + "start playing, then press Download again. (Right-click Download to save this clip anyway.)"
-                return
+            case .stream(let choice):
+                var note = "Added to Downloads"
+                if let d = choice.duration { note += ": main video, \(Self.clock(d))" }
+                if choice.skippedAds > 0 { note += ". Skipped \(choice.skippedAds) ad stream\(choice.skippedAds == 1 ? "" : "s")" }
+                // A playlist recognised by its content behind a disguised address: yt-dlp would save the playlist text
+                // itself, so it goes straight to the browser engine, which joins the pieces.
+                let disguised = choice.stream.type == .hls && !choice.stream.url.lowercased().contains(".m3u8")
+                queueStream(choice.stream, viaBrowser: disguised, message: note + ". You can keep browsing.")
             }
-            var note = "Added to Downloads"
-            if let d = choice.duration { note += ": main video, \(Self.clock(d))" }
-            if choice.skippedAds > 0 { note += ". Skipped \(choice.skippedAds) ad stream\(choice.skippedAds == 1 ? "" : "s")" }
-            // A playlist recognised by its content behind a disguised address: yt-dlp would save the playlist text
-            // itself, so it goes straight to the browser engine, which joins the pieces.
-            let disguised = choice.stream.type == .hls && !choice.stream.url.lowercased().contains(".m3u8")
-            queueStream(choice.stream, viaBrowser: disguised, message: note + ". You can keep browsing.")
         }
     }
 
@@ -700,7 +710,10 @@ struct BrowserView: View {
             Button("Choose quality…") { openQualities() }
         }
         if browser.currentURL != nil {
-            Button("Use page link") { send() }
+            Button("Use page link") {
+                browser.notePageLinkByHand()
+                send()
+            }
         }
     }
 

@@ -185,8 +185,14 @@ enum DASH {
 final class StreamCheckLog {
     private var lines: [String] = []
 
+    /// Tests point the log elsewhere.
+    static var fileURLOverride: URL?
+    /// The last entry written, for tests.
+    private(set) static var lastEntry: String?
+    private static let writer = DispatchQueue(label: "Pathfinder.StreamCheckLog", qos: .utility)
+
     static var fileURL: URL {
-        (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        fileURLOverride ?? (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())).appendingPathComponent("Pathfinder/stream-check.log")
     }
 
@@ -195,13 +201,16 @@ final class StreamCheckLog {
     func save() {
         let stamp = ISO8601DateFormatter().string(from: Date())
         let entry = "=== \(stamp)\n" + lines.joined(separator: "\n") + "\n\n"
+        Self.lastEntry = entry
         let url = Self.fileURL
-        Task.detached(priority: .utility) {
+        // One write at a time: two presses in a row must not overwrite each other's entry.
+        Self.writer.async {
             try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             var data = (try? Data(contentsOf: url)) ?? Data()
             data.append(Data(entry.utf8))
             if data.count > 200_000 { data = data.suffix(200_000) }
-            try? data.write(to: url, options: .atomic)
+            // A plain write: a log needs no atomic swap, and that also works where only this folder is writable.
+            try? data.write(to: url)
         }
     }
 
@@ -322,6 +331,14 @@ final class CaptureContext: NSObject, WKNavigationDelegate {
     }
 }
 
+/// A media address found again in the page by `recoverStreams()`.
+private struct RecoveredSource: Sendable {
+    let url: String
+    let page: String?
+    let title: String
+    let kind: String
+}
+
 private struct PageFetch: Sendable {
     let status: Int
     let base64: String?
@@ -398,6 +415,7 @@ extension BrowserModel: BrowserDownloadEngine {
     /// Small requests made while choosing a stream, run inside the page:
     /// `text`: a playlist's text. `size`: a file's size (HEAD, else a one-byte range request).
     /// `media`: the duration of a <video>/<audio> on the page playing this address (what the player itself knows).
+    /// `kind`: what the address answers with, from its content type or first bytes: "hls", "dash", "video" or null.
     /// Gives up after 10 seconds so the Download button never hangs on a silent server.
     private static let probeScript = """
     if (mode === 'media') {
@@ -417,6 +435,30 @@ extension BrowserModel: BrowserDownloadEngine {
         return r && r.ok ? r : null;
     }
     try {
+        if (mode === 'kind') {
+            const r = await get({ headers: { Range: 'bytes=0-2047' } });
+            if (!r) return null;
+            const ct = (r.headers.get('content-type') || '').toLowerCase();
+            let bytes = new Uint8Array(0);
+            if (!ct.startsWith('video/') && !ct.startsWith('audio/') && r.body) {
+                const reader = r.body.getReader();
+                const chunk = await reader.read();
+                if (chunk.value) bytes = chunk.value;
+            }
+            try { r.body && r.body.cancel(); } catch (e) {}
+            if (ct.indexOf('mpegurl') !== -1) return 'hls';
+            if (ct.indexOf('dash+xml') !== -1) return 'dash';
+            if (ct.startsWith('video/') || ct.startsWith('audio/')) return 'video';
+            let head = new TextDecoder().decode(bytes.slice(0, 2048));
+            if (head.charCodeAt(0) === 0xFEFF) head = head.slice(1);
+            head = head.trimStart();
+            if (head.startsWith('#EXTM3U')) return 'hls';
+            if (head.indexOf('<MPD') !== -1) return 'dash';
+            const ftyp = bytes.length > 8 && bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70;
+            const ebml = bytes.length > 4 && bytes[0] === 0x1A && bytes[1] === 0x45 && bytes[2] === 0xDF && bytes[3] === 0xA3;
+            const ts = bytes.length > 376 && bytes[0] === 0x47 && bytes[188] === 0x47 && bytes[376] === 0x47;
+            return ftyp || ebml || ts ? 'video' : null;
+        }
         if (mode === 'size') {
             const h = await get({ method: 'HEAD' });
             const len = h && h.headers.get('content-length');
@@ -456,6 +498,7 @@ extension BrowserModel: BrowserDownloadEngine {
 
     /// How long a stream plays, asked through the frame that played it; for a direct file without a known
     /// length, how big it is. nil when the site doesn't answer or the stream is live.
+    /// A `.other` stream is first asked what it is; it keeps `.other` when it is not a playlist or a video.
     private func measure(_ stream: DetectedStream) async -> Measurement? {
         guard let url = URL(string: stream.url) else { return nil }
         var targets: [FetchTarget] = []
@@ -467,7 +510,12 @@ extension BrowserModel: BrowserDownloadEngine {
             return await probe(url, mode: "size", targets: targets).flatMap(Double.init).map(Measurement.bytes)
         case .dash:
             return await probe(url, mode: "text", targets: targets).flatMap(DASH.duration(of:)).map(Measurement.seconds)
-        case .hls, .other:
+        case .other:
+            guard let kind = await probe(url, mode: "kind", targets: targets),
+                  let type = DetectedStream.StreamType(probedKind: kind) else { return nil }
+            stream.type = type
+            return await measure(stream)
+        case .hls:
             guard let text = await probe(url, mode: "text", targets: targets), HLS.isPlaylist(text) else { return nil }
             guard HLS.isMaster(text) else { return HLS.duration(of: text).map(Measurement.seconds) }
             guard let variant = HLS.bestVariant(in: text), let vURL = URL(string: variant.uri, relativeTo: url)?.absoluteURL,
@@ -572,22 +620,28 @@ extension BrowserModel: BrowserDownloadEngine {
     /// streams look alike; what differs is length. Every stream on the page is measured (playlists by their
     /// segments, direct files by the page's own player or their size) and the longest wins. Each step is written
     /// to the stream-check log so a wrong pick on a given site can be looked into.
-    func mainStream(among streams: [DetectedStream]) async -> MainStreamChoice? {
-        let log = StreamCheckLog()
-        log.add("Page: \(currentURL?.absoluteString ?? "-")")
+    /// `log`: the caller's entry to add to; without one the check writes its own.
+    func mainStream(among streams: [DetectedStream], log shared: StreamCheckLog? = nil) async -> MainStreamChoice? {
+        let log = shared ?? StreamCheckLog()
+        if shared == nil { log.add("Page: \(currentURL?.absoluteString ?? "-")") }
         log.add("Players: \(await pagePlayers())")
         let clean = streams.filter { !DetectedStream.looksLikeAd($0.url) }
         let pool = clean.isEmpty ? streams : clean
         let filteredByURL = streams.count - clean.count
         for s in streams where !clean.contains(where: { $0 === s }) { log.add("ad address, skipped: \(s.url)") }
-        let candidates = Array(pool.filter { $0.type != .other || $0.url.lowercased().contains(".m3u8") }
-            .sorted { $0.foundAt < $1.foundAt }.suffix(12))
+        // `.other` streams are asked what they are when measured; those that turn out to be neither
+        // a playlist nor a video are left out below.
+        let candidates = Array(pool.sorted { $0.foundAt < $1.foundAt }.suffix(12))
 
         var timed: [(stream: DetectedStream, seconds: Double)] = []
         var sized: [(stream: DetectedStream, bytes: Double)] = []
         var unmeasured: [DetectedStream] = []
         for stream in candidates {
             let m = await measure(stream)
+            if stream.type == .other {
+                log.add("not a playlist or video, skipped: \(stream.url)")
+                continue
+            }
             switch m {
             case .seconds(let d)?: timed.append((stream, d))
             case .bytes(let b)?: sized.append((stream, b))
@@ -600,7 +654,7 @@ extension BrowserModel: BrowserDownloadEngine {
             let skipped = filteredByURL + timed.filter { $0.stream !== stream && $0.seconds < Self.minimumMainLength }.count
                 + sized.filter { $0.stream !== stream && $0.bytes < Self.minimumMainBytes }.count
             log.add("CHOSEN (\(why)): \(stream.url)")
-            log.save()
+            if shared == nil { log.save() }
             return MainStreamChoice(stream: stream, duration: duration, skippedAds: skipped)
         }
 
@@ -625,9 +679,90 @@ extension BrowserModel: BrowserDownloadEngine {
             // A small file of unknown length: treat as a short clip so it isn't saved by surprise.
             return choose(biggest.stream, 0, "only small files")
         }
-        log.save()
+        log.add("CHOSEN: nothing")
+        if shared == nil { log.save() }
         return nil
     }
+
+    /// One press of the browser's Download button: known video sites go to yt-dlp as a page link; elsewhere the
+    /// streams the page loaded are gathered (including ones the sniffer missed) and the main one is chosen.
+    /// Every press is written to stream-check.log with the path taken.
+    func chooseDownload(knownVideoPage: Bool) async -> DownloadDecision {
+        let log = StreamCheckLog()
+        defer { log.save() }
+        log.add("Page: \(currentURL?.absoluteString ?? "-")")
+        if knownVideoPage {
+            log.add("DECISION: \(DownloadDecision.pageLink.logName) (known video site)")
+            return .pageLink
+        }
+        let recovered = await recoverStreams()
+        log.add("Recovered from the page: \(recovered)")
+        let streams = detectedStreams
+        let choice = streams.isEmpty ? nil : await mainStream(among: streams, log: log)
+        let decision = DownloadDecision(choice)
+        log.add("DECISION: \(decision.logName)")
+        return decision
+    }
+
+    /// "Use page link" from the Download button's menu: the person chose to send the page address to yt-dlp.
+    func notePageLinkByHand() {
+        let log = StreamCheckLog()
+        log.add("Page: \(currentURL?.absoluteString ?? "-")")
+        log.add("DECISION: \(DownloadDecision.pageLink.logName) (chosen by hand)")
+        log.save()
+    }
+
+    /// Looks again in the page and each of its frames for streams the sniffer did not report: what the
+    /// <video>/<audio> elements play (http only, not blob:) and the playlists in the page's Resource Timing list.
+    /// They are added like any detected stream. Returns how many were new.
+    @discardableResult
+    func recoverStreams() async -> Int {
+        let tab = selectedTab
+        let before = tab.detectedStreams.count
+        var targets = [FetchTarget(webView: tab.webView, frame: nil)]
+        for frame in tab.knownFrames where frame.webView === tab.webView {
+            targets.append(FetchTarget(webView: tab.webView, frame: frame))
+        }
+        for target in targets {
+            let found: [RecoveredSource] = await withCheckedContinuation { continuation in
+                target.webView.callAsyncJavaScript(Self.recoverScript, arguments: [:], in: target.frame, in: .defaultClient) { result in
+                    let rows = (try? result.get()) as? [[String: Any]] ?? []
+                    continuation.resume(returning: rows.compactMap { row in
+                        (row["url"] as? String).map {
+                            RecoveredSource(url: $0, page: row["page"] as? String, title: row["title"] as? String ?? "",
+                                            kind: row["kind"] as? String ?? "")
+                        }
+                    })
+                }
+            }
+            for entry in found {
+                handleDetectedStream(url: entry.url, pageURL: entry.page ?? tab.currentURL?.absoluteString ?? "",
+                                     title: entry.title, kind: entry.kind, frame: target.frame, in: tab.webView)
+            }
+        }
+        return tab.detectedStreams.count - before
+    }
+
+    private static let recoverScript = #"""
+    const out = [];
+    const page = location.href, title = document.title || '';
+    for (const el of document.querySelectorAll('video, audio, source')) {
+        const s = el.currentSrc || el.src;
+        if (s && /^https?:/i.test(s)) out.push({ url: s, kind: '', page, title });
+    }
+    try {
+        const skip = /\.(ts|m4s|aac|m4a|vtt|webvtt|key|jpg|jpeg|png|gif|webp|js|css)$/;
+        for (const e of performance.getEntriesByType('resource')) {
+            const path = e.name.toLowerCase().split('#')[0].split('?')[0];
+            if (!/^https?:/.test(e.name)) continue;
+            if (path.indexOf('.m3u8') !== -1) out.push({ url: e.name, kind: 'hls', page, title });
+            else if (path.indexOf('.mpd') !== -1) out.push({ url: e.name, kind: 'dash', page, title });
+            else if ((e.initiatorType === 'xmlhttprequest' || e.initiatorType === 'fetch') && !skip.test(path)
+                     && /\/(hls|dash)\/|playlist|manifest/.test(path)) out.push({ url: e.name, kind: '', page, title });
+        }
+    } catch (e) {}
+    return out;
+    """#
 
     // MARK: Queue engine
 
