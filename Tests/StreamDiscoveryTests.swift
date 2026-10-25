@@ -23,7 +23,7 @@ final class LocalSite {
         for (path, body) in files {
             let url = root.appendingPathComponent(path)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try body.write(to: url, atomically: true, encoding: .utf8)
+            try body.write(to: url, atomically: false, encoding: .utf8)
         }
         let port = Int.random(in: 20000...40000)
         server = Process()

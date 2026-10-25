@@ -209,7 +209,8 @@ final class StreamCheckLog {
             var data = (try? Data(contentsOf: url)) ?? Data()
             data.append(Data(entry.utf8))
             if data.count > 200_000 { data = data.suffix(200_000) }
-            try? data.write(to: url, options: .atomic)
+            // A plain write: a log needs no atomic swap, and that also works where only this folder is writable.
+            try? data.write(to: url)
         }
     }
 
