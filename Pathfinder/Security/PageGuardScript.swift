@@ -348,23 +348,44 @@ enum PageGuardScript {
       // ---------- obfuscated code ----------
       function looksObfuscated(code) {
         var s = String(code);
-        if (/^\s*eval\(function\(p,a,c,k,e,[dr]\)/.test(s) || /\}\('.{200,}',\d+,\d+,'/.test(s)) return 'packed script (p,a,c,k,e,d)';
+        if (/eval\(function\(p,a,c,k,e,[dr]\)/.test(s) || /\}\('.{200,}',\d+,\d+,'/.test(s)) return 'packed script (p,a,c,k,e,d)';
         if ((s.match(/_0x[0-9a-f]{4,6}/g) || []).length > 30) return 'obfuscator.io style identifiers';
         if (/(\\x[0-9a-f]{2}){24,}/i.test(s)) return 'long hex-escaped string';
         if (/(\\u[0-9a-f]{4}){24,}/i.test(s)) return 'long unicode-escaped string';
         return null;
       }
-      var origEval = window.eval;
-      window.eval = function (code) {
-        try {
-          if (typeof code === 'string') {
-            var why = looksObfuscated(code);
-            if (why) emit('malvertising', 'low', 'Obfuscated code run with eval', why, false);
-            if (/coinhive|cryptonight|CryptoLoot|new\s+CoinHive/i.test(code)) emit('cryptojacking', 'high', 'Miner code run with eval', code.slice(0, 100), false);
+      // The page's scripts are read, not hooked: replacing window.eval would turn the page's direct eval calls
+      // into indirect ones, which run at global scope and break players that build their stream address with eval.
+      var scriptsRead = 0;
+      function checkScriptText(code) {
+        if (scriptsRead >= 200 || !code) return;
+        scriptsRead++;
+        var text = String(code).slice(0, 200000);
+        var why = looksObfuscated(text);
+        if (why) emit('malvertising', 'low', 'Obfuscated code in a page script', why, false);
+        if (/coinhive|cryptonight|CryptoLoot|new\s+CoinHive/i.test(text)) emit('cryptojacking', 'high', 'Miner code in a page script', text.slice(0, 100), false);
+      }
+      function checkInlineScripts() {
+        var inline = document.querySelectorAll('script:not([src])');
+        for (var i = 0; i < inline.length; i++) {
+          if (inline[i].__pfRead) continue;
+          inline[i].__pfRead = true;
+          checkScriptText(inline[i].textContent);
+        }
+      }
+      try {
+        var scriptWatcher = new MutationObserver(function (records) {
+          for (var i = 0; i < records.length; i++) {
+            var added = records[i].addedNodes;
+            for (var j = 0; j < added.length; j++) {
+              var n = added[j];
+              if (n.tagName === 'SCRIPT' && !n.src && !n.__pfRead) { n.__pfRead = true; checkScriptText(n.textContent); }
+            }
           }
-        } catch (e) {}
-        return origEval.apply(this, arguments);
-      };
+          if (scriptsRead >= 200) scriptWatcher.disconnect();
+        });
+        scriptWatcher.observe(document, { childList: true, subtree: true });
+      } catch (e) {}
 
       // ---------- cryptojacking: workers and miner scripts ----------
       var minerName = /(coin-?hive|crypto-?loot|coinimp|web-?miner|deep-?miner|jsecoin|authedmine|minero|webmr|cryptonight|monero-?miner|xmr-?(stak|rig|miner)|cn-?wasm)/i;
@@ -492,7 +513,7 @@ enum PageGuardScript {
       }
 
       function run() {
-        try { checkMiners(); checkWebShell(); checkRedirects(); checkUrlPayload(); } catch (e) {}
+        try { checkInlineScripts(); checkMiners(); checkWebShell(); checkRedirects(); checkUrlPayload(); } catch (e) {}
         setTimeout(function () { try { checkOverlays(); checkMiners(); } catch (e) {} }, 2000);
         setTimeout(function () { try { checkOverlays(); checkMiners(); } catch (e) {} }, 6000);
       }
