@@ -33,6 +33,11 @@ final class FileIntegrityMonitor {
     private(set) var unexpected: [String] = []
     private(set) var lastCheck: Date?
     private(set) var busy = false
+    /// A "Trust all" is running.
+    private(set) var trusting = false
+    /// Writes of the store so far, for tests.
+    @ObservationIgnored private(set) var saveCount = 0
+    @ObservationIgnored private let storeURL: URL
     /// Folders scanned for files that nobody registered (the Downloads folder, the tools folder).
     @ObservationIgnored var watchedFolders: () -> [String] = { [] }
     @ObservationIgnored private var loop: Task<Void, Never>?
@@ -48,7 +53,13 @@ final class FileIntegrityMonitor {
     var changedCount: Int { states.values.filter { $0 == .modified || $0 == .missing }.count }
     var problemCount: Int { changedCount + unexpected.count }
 
-    private static var storeURL: URL {
+    /// What "Trust all" would take: new files, and watched files that changed. Missing files have nothing to trust.
+    var trustAllCounts: (new: Int, changed: Int) {
+        (unexpected.count, entries.filter { states[$0.path] == .modified }.count)
+    }
+    var canTrustAll: Bool { trustAllCounts.new + trustAllCounts.changed > 0 }
+
+    static var defaultStoreURL: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Pathfinder", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -60,15 +71,18 @@ final class FileIntegrityMonitor {
             .appendingPathComponent("Pathfinder/bin").path
     }
 
-    init() {
-        if let data = try? Data(contentsOf: Self.storeURL),
+    init(storeURL: URL = FileIntegrityMonitor.defaultStoreURL) {
+        self.storeURL = storeURL
+        if let data = try? Data(contentsOf: storeURL),
            let saved = try? JSONDecoder.iso.decode([IntegrityEntry].self, from: data) {
             entries = saved
         }
     }
 
     private func save() {
-        if let data = try? JSONEncoder.iso.encode(entries) { try? data.write(to: Self.storeURL, options: .atomic) }
+        saveCount += 1
+        // A plain write: it also works where only this folder is writable.
+        if let data = try? JSONEncoder.iso.encode(entries) { try? data.write(to: storeURL) }
     }
 
     /// Start the periodic quick check (size and modification time; a changed file is then hashed).
@@ -112,6 +126,45 @@ final class FileIntegrityMonitor {
     func accept(_ path: String) async {
         let previous = entries.first { $0.path == path }
         await record(path: path, source: previous?.source ?? .manual, origin: previous?.origin)
+    }
+
+    /// Trust every new file and accept every changed one as it is now, in one go: fingerprints are made off the
+    /// main thread and the store is written once. Missing files are left as they are. A file that can no longer be
+    /// read is skipped and keeps its state.
+    func trustAll() async {
+        guard !trusting, !busy else { return }
+        trusting = true
+        defer { trusting = false }
+        let newPaths = unexpected
+        let changed = entries.filter { states[$0.path] == .modified }
+        let paths = newPaths + changed.map(\.path)
+        guard !paths.isEmpty else { return }
+        let prints = await Task.detached(priority: .utility) { () -> [String: Fingerprint] in
+            var result: [String: Fingerprint] = [:]
+            for path in paths { result[path] = Self.fingerprint(path) }
+            return result
+        }.value
+
+        let now = Date()
+        for old in changed {
+            guard let f = prints[old.path], let i = entries.firstIndex(where: { $0.path == old.path }) else { continue }
+            entries[i].sha256 = f.hash
+            entries[i].size = f.size
+            entries[i].modified = f.modified
+            entries[i].note = f.note
+            states[old.path] = .ok
+        }
+        var trusted = Set<String>()
+        for path in newPaths {
+            guard let f = prints[path] else { continue }
+            entries.removeAll { $0.path == path }
+            entries.insert(IntegrityEntry(path: path, sha256: f.hash, size: f.size, modified: f.modified,
+                                          source: .manual, origin: nil, addedAt: now, note: f.note), at: 0)
+            states[path] = .ok
+            trusted.insert(path)
+        }
+        unexpected.removeAll { trusted.contains($0) }
+        save()
     }
 
     func remove(_ path: String) {
