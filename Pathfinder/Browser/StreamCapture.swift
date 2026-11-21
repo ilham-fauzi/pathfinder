@@ -214,6 +214,23 @@ final class StreamCheckLog {
         }
     }
 
+    /// An address with its query string and long path shortened (tokens), for the log.
+    static func shortened(_ url: URL?) -> String {
+        guard let url else { return "-" }
+        var text = (url.scheme.map { $0 + "://" } ?? "") + (url.host ?? "") + url.path
+        if text.count > 90 { text = String(text.prefix(60)) + "…" + String(text.suffix(25)) }
+        if let query = url.query, !query.isEmpty { text += "?" + String(query.prefix(8)) + "…" }
+        return text
+    }
+
+    /// The first answer of the server to a direct-file request, on one line.
+    static func describe(_ http: HTTPURLResponse) -> String {
+        func header(_ name: String) -> String { http.value(forHTTPHeaderField: name) ?? "-" }
+        return "Download response: status \(http.statusCode), Content-Type \(header("Content-Type")), "
+            + "Content-Length \(header("Content-Length")), Content-Range \(header("Content-Range")), "
+            + "Accept-Ranges \(header("Accept-Ranges")), address \(shortened(http.url))"
+    }
+
     static func describe(_ m: BrowserModel.Measurement) -> String {
         switch m {
         case .seconds(let d): return clock(d)

@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 
 /// What one press of the browser's Download button does.
 enum DownloadDecision {
@@ -29,4 +30,25 @@ enum DownloadDecision {
 
     static let noStreamMessage = "No video stream found yet. Let the video play, then press Download again. "
         + "(Right-click Download and choose Use page link to try the page address.)"
+}
+
+/// Catches a saved file that is only a preview of the video the page was playing.
+@MainActor
+enum PreviewCheck {
+    /// A file shorter than this share of the page's stated length is a preview.
+    static let shortShare = 0.5
+
+    /// The message for the Downloads list, or nil when the file is long enough (or a length is unknown).
+    static func message(savedSeconds: Double?, expectedSeconds: Double?) -> String? {
+        guard let saved = savedSeconds, let expected = expectedSeconds, expected > 0, saved < expected * shortShare else { return nil }
+        return "The saved file looks like a preview: it is \(StreamCheckLog.clock(saved)) long, the page's video is "
+            + "\(StreamCheckLog.clock(expected)). Try again."
+    }
+
+    /// Playing time of a saved media file; nil when it cannot be read.
+    static func seconds(ofFileAt path: String) async -> Double? {
+        let asset = AVURLAsset(url: URL(fileURLWithPath: path))
+        guard let time = try? await asset.load(.duration), time.isNumeric, time.seconds > 0 else { return nil }
+        return time.seconds
+    }
 }

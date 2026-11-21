@@ -53,6 +53,8 @@ final class DownloadItem: Identifiable {
     var isHLS = false
     /// Quality picked in the browser (picture height); nil takes the best.
     @ObservationIgnored var hlsHeight: Int?
+    /// Length in seconds the page gave for the chosen stream; a saved file far shorter is a preview.
+    @ObservationIgnored var expectedSeconds: Double?
     /// When yt-dlp is refused, switch this item to the browser engine instead of failing.
     var browserFallback = false
     /// The file's real extension when it was saved under a disguised one (".jpg" for an mp4).

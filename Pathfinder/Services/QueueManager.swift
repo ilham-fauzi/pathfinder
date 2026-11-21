@@ -119,7 +119,8 @@ class QueueManager {
     /// A stream found in the browser: tried with yt-dlp at the best quality, then through the browser if refused
     /// (or straight through the browser when `viaBrowser`). Runs in the background like any other download.
     func enqueueStream(url: String, title: String, pageURL: String?, isHLS: Bool, outputDir: String,
-                       frame: AnyObject?, cookiesFile: URL?, viaBrowser: Bool, maxHeight: Int? = nil) {
+                       frame: AnyObject?, cookiesFile: URL?, viaBrowser: Bool, maxHeight: Int? = nil,
+                       expectedSeconds: Double? = nil) {
         let options = DownloadOptions()
         if let h = maxHeight { options.format = "bv*[height<=\(h)]+ba/b[height<=\(h)]/bv*+ba/b" }
         if !viaBrowser {
@@ -134,6 +135,7 @@ class QueueManager {
         item.pageURL = pageURL
         item.isHLS = isHLS
         item.hlsHeight = maxHeight
+        item.expectedSeconds = expectedSeconds
         item.browserFallback = !viaBrowser
         item.browserFrame = frame
         save()
@@ -366,6 +368,21 @@ class QueueManager {
         }
         do {
             let path = try await engine.download(item)
+            guard item.status == .downloading || item.status == .postProcessing else { return }
+            // A direct file far shorter than the page said is a preview, not the video: do not call it finished.
+            if !item.isHLS, item.expectedSeconds != nil {
+                let saved = await PreviewCheck.seconds(ofFileAt: path)
+                if let message = PreviewCheck.message(savedSeconds: saved, expectedSeconds: item.expectedSeconds),
+                   item.status == .downloading || item.status == .postProcessing {
+                    try? FileManager.default.removeItem(atPath: path)
+                    item.status = .failed
+                    item.error = message
+                    item.speed = nil
+                    item.eta = nil
+                    onFailed?(item)
+                    return
+                }
+            }
             guard item.status == .downloading || item.status == .postProcessing else { return }
             item.status = .completed
             item.progress = 100

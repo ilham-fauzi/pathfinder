@@ -36,14 +36,25 @@ final class SegmentedDownloader: Sendable {
     let length: Int64
     private let session: URLSession
 
-    /// Whether the response to the browser's own request allows this: a plain 200 with a known big size,
-    /// byte ranges accepted, and no transfer compression (which would make byte offsets meaningless).
+    /// Size of the whole file as the response states it: the Content-Range total of a 206, or the length of a 200.
+    static func fullLength(of response: HTTPURLResponse) -> Int64? {
+        if response.statusCode == 206 {
+            let range = response.value(forHTTPHeaderField: "Content-Range") ?? ""
+            guard let total = range.split(separator: "/").last, let n = Int64(total.trimmingCharacters(in: .whitespaces)) else { return nil }
+            return n
+        }
+        return response.statusCode == 200 && response.expectedContentLength > 0 ? response.expectedContentLength : nil
+    }
+
+    /// Whether the response to the browser's own request allows this: the whole file (a 200, or a 206 to the
+    /// player-style `Range: bytes=0-` request) of known big size, byte ranges accepted, and no transfer
+    /// compression (which would make byte offsets meaningless).
     static func qualifies(_ response: HTTPURLResponse) -> Bool {
-        guard response.statusCode == 200, response.expectedContentLength >= minimumLength,
+        guard let length = fullLength(of: response), length >= minimumLength,
               let scheme = response.url?.scheme, scheme == "http" || scheme == "https" else { return false }
         let ranges = (response.value(forHTTPHeaderField: "Accept-Ranges") ?? "").lowercased()
         let encoding = (response.value(forHTTPHeaderField: "Content-Encoding") ?? "").lowercased()
-        return ranges.contains("bytes") && (encoding.isEmpty || encoding == "identity")
+        return (response.statusCode == 206 || ranges.contains("bytes")) && (encoding.isEmpty || encoding == "identity")
     }
 
     /// `socksPort`: the SSH tunnel's SOCKS port when the tunnel is required, so these connections use it too.
@@ -69,7 +80,9 @@ final class SegmentedDownloader: Sendable {
         var req = URLRequest(url: url)
         for (key, value) in headers { req.setValue(value, forHTTPHeaderField: key) }
         req.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-        if let range { req.setValue("bytes=\(range.lowerBound)-\(range.upperBound)", forHTTPHeaderField: "Range") }
+        // A request for the whole file asks the way a player does ("bytes=0-"): some servers answer a plain
+        // request with a short preview and only a ranged one with the film.
+        req.setValue(range.map { "bytes=\($0.lowerBound)-\($0.upperBound)" } ?? "bytes=0-", forHTTPHeaderField: "Range")
         return req
     }
 
@@ -211,7 +224,7 @@ final class SegmentedDownloader: Sendable {
     /// The whole file over one connection (server without range support).
     private func single(into file: URL, progress: @escaping @Sendable (Snapshot) -> Void) async throws {
         let (bytes, response) = try await session.bytes(for: request())
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 || http.statusCode == 206 else {
             throw SegmentedDownloadError.badStatus((response as? HTTPURLResponse)?.statusCode ?? 0)
         }
         let handle = try FileHandle(forWritingTo: file)
