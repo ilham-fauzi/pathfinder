@@ -1038,13 +1038,23 @@ final class BrowserModel: NSObject {
         }
     }
 
-    /// Queue engine for direct files: download with the page as Referer and the browser's cookies.
-    func downloadDirect(_ item: DownloadItem, url: URL) async throws -> String {
+    /// The request a page's player makes for a file: the whole file as a range ("bytes=0-"), the player frame's
+    /// address as Referer and its origin, and the browser's User-Agent (cookies come from the browser's own store).
+    /// A server may answer a plain request with a short preview and only this one with the film.
+    static func playerRequest(for url: URL, referer: String?) -> URLRequest {
         var request = URLRequest(url: url)
-        if let referer = item.pageURL, let ref = URL(string: referer) {
+        request.setValue("bytes=0-", forHTTPHeaderField: "Range")
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        if let referer, let ref = URL(string: referer) {
             request.setValue(referer, forHTTPHeaderField: "Referer")
             if let scheme = ref.scheme, let host = ref.host { request.setValue("\(scheme)://\(host)", forHTTPHeaderField: "Origin") }
         }
+        return request
+    }
+
+    /// Queue engine for direct files: download with the page as Referer and the browser's cookies.
+    func downloadDirect(_ item: DownloadItem, url: URL) async throws -> String {
+        let request = Self.playerRequest(for: url, referer: item.pageURL)
         let download = await webView.startDownload(using: request)
         register(download, frame: item.browserFrame as? WKFrameInfo)
         guard let entry = active(download) else { throw CancellationError() }
@@ -1249,13 +1259,21 @@ extension BrowserModel: WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
             name = Self.fileName(from: title, fallback: name, ext: ext.isEmpty ? "mp4" : ext)
         }
         let url = uniqueDestination(for: name, in: entry.item?.outputDir)
+        if let http = response as? HTTPURLResponse {
+            // What the server answered, so a wrong file from a site can be traced.
+            let log = StreamCheckLog()
+            log.add("Page: \(entry.item?.pageURL ?? sourceTab.currentURL?.absoluteString ?? "-")")
+            log.add(StreamCheckLog.describe(http))
+            log.save()
+        }
         // A big file that allows byte ranges is fetched over several connections instead of one.
-        if let http = response as? HTTPURLResponse, SegmentedDownloader.qualifies(http), let remote = http.url {
+        if let http = response as? HTTPURLResponse, SegmentedDownloader.qualifies(http), let remote = http.url,
+           let fullLength = SegmentedDownloader.fullLength(of: http) {
             activeDownloads.removeValue(forKey: ObjectIdentifier(download))
             entry.progressObservation = nil
             entry.destination = url
             completionHandler(nil)   // ends WebKit's single-connection download
-            startSegmented(entry, remote: remote, length: http.expectedContentLength, destination: url,
+            startSegmented(entry, remote: remote, length: fullLength, destination: url,
                            referer: entry.item?.pageURL ?? entry.frame?.request.url?.absoluteString ?? sourceTab.currentURL?.absoluteString)
             return
         }

@@ -678,7 +678,8 @@ struct BrowserView: View {
                 // A playlist recognised by its content behind a disguised address: yt-dlp would save the playlist text
                 // itself, so it goes straight to the browser engine, which joins the pieces.
                 let disguised = choice.stream.type == .hls && !choice.stream.url.lowercased().contains(".m3u8")
-                queueStream(choice.stream, viaBrowser: disguised, message: note + ". You can keep browsing.")
+                queueStream(choice.stream, viaBrowser: disguised || choice.stream.type == .direct, message: note + ". You can keep browsing.",
+                            expectedSeconds: choice.duration)
             }
         }
     }
@@ -743,7 +744,8 @@ struct BrowserView: View {
         queueStream(stream, viaBrowser: true)
     }
 
-    private func queueStream(_ stream: DetectedStream, viaBrowser: Bool, message: String? = nil, maxHeight: Int? = nil) {
+    private func queueStream(_ stream: DetectedStream, viaBrowser: Bool, message: String? = nil, maxHeight: Int? = nil,
+                             expectedSeconds: Double? = nil) {
         let pageTitle = stream.title.isEmpty ? browser.title : stream.title
         Task {
             // The stream is usually on a CDN host, so send cookies for both it and the page.
@@ -751,7 +753,8 @@ struct BrowserView: View {
                 : await browser.exportCookies(for: [stream.url, stream.pageURL].compactMap(URL.init(string:)))
             queueManager.enqueueStream(url: stream.url, title: pageTitle, pageURL: stream.pageURL, isHLS: stream.type == .hls,
                                        outputDir: appState.outputDirectory, frame: stream.frame,
-                                       cookiesFile: cookies, viaBrowser: viaBrowser, maxHeight: maxHeight)
+                                       cookiesFile: cookies, viaBrowser: viaBrowser, maxHeight: maxHeight,
+                                       expectedSeconds: stream.type == .direct ? expectedSeconds : nil)
             browser.statusMessage = message
                 ?? "Added to Downloads: \(pageTitle.isEmpty ? stream.displayName : pageTitle). You can keep browsing."
         }
